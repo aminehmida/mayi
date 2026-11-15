@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -15,7 +16,7 @@ use mayi_core::grants::GrantScope;
 use mayi_core::hardware::HardwareKeys;
 use mayi_core::model::{ItemMeta, Kind, Level, NewItem};
 use mayi_core::policy::{command_line, Rules};
-use mayi_core::server::Server;
+use mayi_core::server::{JoinCode, Server};
 use mayi_core::vault::Vault;
 use mayi_proto::RunRequest;
 use zeroize::Zeroizing;
@@ -386,6 +387,46 @@ pub fn recover_vault(
     Ok(())
 }
 
+/// A code this device shows while it has no vault, so that a device that
+/// holds one can add it: the phone scans the code a new Mac shows, or a Mac
+/// pastes the code a new phone or Mac shows (`VaultDevice.add_device_by_code`).
+#[derive(uniffi::Object)]
+pub struct JoinInvitation {
+    code: JoinCode,
+    cancelled: AtomicBool,
+}
+
+#[uniffi::export]
+impl JoinInvitation {
+    /// Starts listening for the other device and makes the code, valid for
+    /// `ttl_secs`. `addresses` are where the other device should look for
+    /// this one; empty means this device's own network addresses.
+    #[uniffi::constructor]
+    pub fn open(addresses: Vec<String>, ttl_secs: u64) -> Result<Arc<Self>, MayiError> {
+        Ok(Arc::new(Self { code: JoinCode::open(addresses, 0, ttl_secs)?, cancelled: AtomicBool::new(false) }))
+    }
+
+    /// The code to show, as a QR code and as text.
+    pub fn token(&self) -> String {
+        self.code.token()
+    }
+
+    /// Blocks until a device with a vault adds this one, the code expires
+    /// ("the code expired"), or `cancel` is called ("cancelled"). On success
+    /// the vault is at `vault_path`, filled by a first sync: open it with
+    /// `VaultDevice.open`.
+    pub fn wait(&self, vault_path: String, device_name: String, keys: Arc<dyn KeyStore>) -> Result<(), MayiError> {
+        let keys: Arc<dyn HardwareKeys> = Arc::new(KeyAdapter(keys));
+        self.code.wait(Path::new(&vault_path), keys, &device_name, &self.cancelled)?;
+        Ok(())
+    }
+
+    /// Makes a `wait` in progress return.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct VaultDevice {
     server: Arc<Server>,
@@ -465,6 +506,13 @@ impl VaultDevice {
         let addresses =
             if addresses.is_empty() { mayi_core::server::local_addresses() } else { addresses };
         Ok(self.server.start_enrolment(addresses, port, ttl_secs)?)
+    }
+
+    /// Adds the device that shows `code` (its `JoinInvitation`): connects to
+    /// it, admits it, which asks for a fingerprint if there are level 4
+    /// secrets, and sends it the vault. Blocks until done; returns its name.
+    pub fn add_device_by_code(&self, code: String) -> Result<String, MayiError> {
+        Ok(self.server.add_device_by_code(&code)?)
     }
 
     /// Every device that ever held the vault, including removed ones.

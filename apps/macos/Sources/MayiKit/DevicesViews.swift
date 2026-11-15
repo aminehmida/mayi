@@ -14,17 +14,37 @@ func qrCode(_ text: String) -> NSImage? {
     return image
 }
 
-/// The invitation for a new vault device, as a QR code and as text.
+/// Adding a device: this Mac's invitation, as a QR code and as text, for a
+/// new device to scan or paste; or the code a new device shows, pasted here.
 public struct EnrolmentSheet: View {
     let token: String?
     let added: String?
+    /// Adds the device that shows the pasted code; returns an error message.
+    let onAddByCode: ((String) async -> String?)?
     let onClose: () -> Void
     @State private var copied = false
+    @State private var code = ""
+    @State private var adding = false
+    @State private var error: String?
 
-    public init(token: String?, added: String?, onClose: @escaping () -> Void) {
+    public init(
+        token: String?, added: String?, onAddByCode: ((String) async -> String?)? = nil,
+        onClose: @escaping () -> Void
+    ) {
         self.token = token
         self.added = added
+        self.onAddByCode = onAddByCode
         self.onClose = onClose
+    }
+
+    private func addByCode() {
+        guard let onAddByCode, !code.isEmpty else { return }
+        adding = true
+        error = nil
+        Task {
+            error = await onAddByCode(code)
+            adding = false
+        }
     }
 
     public var body: some View {
@@ -37,7 +57,7 @@ public struct EnrolmentSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else if let token {
                 Text("Add a Device").font(.headline)
-                Text("In Mayi on the new device, choose \u{201C}Join a vault\u{201D} and scan this code. It works once, within \(AppModel.pairingMinutes) minutes.")
+                Text("On a new phone, choose \u{201C}Scan code from another device\u{201D} and scan this. On a new Mac, paste it as text under \u{201C}Use an Invitation\u{201D}. It works once, within \(AppModel.pairingMinutes) minutes.")
                     .fixedSize(horizontal: false, vertical: true)
                 if let image = qrCode(token) {
                     // A QR code must stay black on white to scan, in either appearance.
@@ -55,6 +75,26 @@ public struct EnrolmentSheet: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if onAddByCode != nil {
+                    Divider().padding(.vertical, 2)
+                    Text("Is the new device showing a code? Paste it here.")
+                    HStack {
+                        TextField("Code", text: $code, prompt: Text("mayij1.\u{2026}"))
+                            .labelsHidden()
+                            .font(.system(.body, design: .monospaced))
+                            .onSubmit(addByCode)
+                            .disabled(adding)
+                        if adding { ProgressView().controlSize(.small) }
+                        Button("Add", action: addByCode)
+                            .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty || adding)
+                    }
+                    if let error {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
             HStack {
                 if added == nil, let token {
@@ -119,6 +159,7 @@ public struct DevicesView: View {
     @ObservedObject var model: AppModel
     @State private var selection: String?
     @State private var showEnrolment = false
+    @State private var confirmJoin = false
     @State private var error: String?
 
     public init(model: AppModel) {
@@ -144,6 +185,23 @@ public struct DevicesView: View {
 
     public var body: some View {
         List(selection: $selection) {
+            if model.vaultIsEmpty {
+                Section {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("This Mac\u{2019}s vault is empty").font(.headline)
+                            Text("If your secrets are on your phone or another Mac, join that vault instead. Mayi restarts and shows a code to scan.")
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button("Join Another Vault\u{2026}") { confirmJoin = true }
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
             ForEach(model.devices, id: \.id) { device in
                 HStack(spacing: 10) {
                     Image(systemName: device.recovery ? "key.horizontal" : device.thisDevice ? "laptopcomputer" : "iphone")
@@ -208,10 +266,22 @@ public struct DevicesView: View {
             Text(model.rotationAdvice ?? "")
         }
         .sheet(isPresented: $showEnrolment) {
-            EnrolmentSheet(token: model.enrolmentToken, added: model.lastDeviceAdded) {
+            EnrolmentSheet(
+                token: model.enrolmentToken, added: model.lastDeviceAdded,
+                onAddByCode: { code in await model.addDevice(code: code) }
+            ) {
                 model.cancelEnrolment()
                 showEnrolment = false
             }
+        }
+        .confirmationDialog("Join another vault?", isPresented: $confirmJoin) {
+            Button("Restart and Join") {
+                error = model.setAsideEmptyVault()
+                if error == nil { model.onRestart?() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This Mac\u{2019}s empty vault is set aside, and Mayi restarts to show a code for your other device to scan.")
         }
     }
 }

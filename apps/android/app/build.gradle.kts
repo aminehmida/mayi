@@ -22,8 +22,8 @@ android {
         // Android 12: key agreement with keys held in the Android Keystore.
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-alpha.1"
+        versionCode = 2
+        versionName = "0.1.0-alpha.2"
         buildConfigField("String", "WAKE_URL", "\"$wakeUrl\"")
         // The ABIs build-core.sh builds the Rust core for. Without this the APK
         // would claim every ABI JNA ships, and crash on the others.

@@ -56,27 +56,43 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var approvalPanel: NSPanel?
     private var shownApproval: UUID?
     private var noticePanel: NSPanel?
+    private var welcomeWindow: NSWindow?
+    private var welcome: WelcomeModel?
     private var subscriptions = Set<AnyCancellable>()
+
+    private var deviceName: String { Host.current().localizedName ?? "Mac" }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         let paths = MayiPaths.fromEnvironment()
+        let keys: SecureEnclaveKeys
         do {
             guard SecureEnclaveKeys.isAvailable else {
                 throw MayiError.Failed(detail: "This Mac has no Secure Enclave, so it cannot be a vault device.")
             }
-            let keys = try SecureEnclaveKeys.loadOrCreate(directory: paths.keys)
-            try model.start(
-                keys: keys, paths: paths, deviceName: Host.current().localizedName ?? "Mac")
+            keys = try SecureEnclaveKeys.loadOrCreate(directory: paths.keys)
         } catch {
-            NSApp.activate(ignoringOtherApps: true)
-            if recover(paths: paths, after: error) { return applicationDidFinishLaunching(notification) }
-            let alert = NSAlert()
-            alert.messageText = "Mayi could not start"
-            alert.informativeText = describe(error)
-            alert.runModal()
-            NSApp.terminate(nil)
+            fail(error)
             return
         }
+        // No vault yet: ask whether to join one or start one.
+        if FileManager.default.fileExists(atPath: paths.vault.path) {
+            launch(paths: paths, keys: keys)
+        } else {
+            showWelcome(paths: paths, keys: keys)
+        }
+    }
+
+    /// Opens the vault, starts serving, and puts Mayi in the menu bar.
+    private func launch(paths: MayiPaths, keys: KeyStore) {
+        do {
+            try model.start(keys: keys, paths: paths, deviceName: deviceName)
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            if recover(paths: paths, after: error) { return launch(paths: paths, keys: keys) }
+            fail(error)
+            return
+        }
+        model.onRestart = { [weak self] in self?.relaunch() }
         installStatusItem(socket: paths.socket)
         model.$pending
             .receive(on: DispatchQueue.main)
@@ -86,6 +102,68 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notices in self?.showNotices(isEmpty: notices.isEmpty) }
             .store(in: &subscriptions)
+    }
+
+    private func fail(_ error: Error) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Mayi could not start"
+        alert.informativeText = describe(error)
+        alert.runModal()
+        NSApp.terminate(nil)
+    }
+
+    private func showWelcome(paths: MayiPaths, keys: KeyStore) {
+        let welcome = WelcomeModel(paths: paths, keys: keys, deviceName: deviceName) { [weak self] _ in
+            guard let self else { return }
+            self.welcomeWindow?.close()
+            self.welcomeWindow = nil
+            self.welcome = nil
+            self.launch(paths: paths, keys: keys)
+            // Joined: the secrets that arrived. Created: where to add the first.
+            self.openMainWindow()
+        }
+        self.welcome = welcome
+        let window = NSWindow(
+            contentRect: .zero, styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true
+        window.title = "Set Up Mayi"
+        window.contentViewController = NSHostingController(rootView: WelcomeView(model: welcome))
+        window.isReleasedWhenClosed = false
+        window.center()
+        welcomeWindow = window
+        installSetupStatusItem()
+        welcome.start()
+        showSetup()
+    }
+
+    @objc private func showSetup() {
+        NSApp.activate(ignoringOtherApps: true)
+        welcomeWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    /// While the Mac has no vault, the menu bar only leads back to setup.
+    private func installSetupStatusItem() {
+        let item = statusItem ?? NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = MayiGlyph.templateImage()
+        item.button?.setAccessibilityLabel("Mayi")
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Set Up Mayi\u{2026}", action: #selector(showSetup), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit Mayi", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        item.menu = menu
+        statusItem = item
+    }
+
+    /// Starts a fresh copy of the app and quits this one, after the vault was
+    /// set aside to join another.
+    private func relaunch() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, _ in
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
     }
 
     /// When the vault exists but this Mac's keys no longer open it (its
@@ -121,7 +199,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func installStatusItem(socket: String) {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let item = statusItem ?? NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = MayiGlyph.templateImage()
         item.button?.setAccessibilityLabel("Mayi")
         let menu = NSMenu()

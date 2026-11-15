@@ -82,11 +82,23 @@ import Testing
         try await snapshot(PairingSheet(token: nil, paired: "build-vm", onClose: {}), name: "paired")
     }
 
+    @Test func welcome() async throws {
+        let dir = try scratch()
+        let welcome = WelcomeModel(
+            paths: MayiPaths(home: dir.appendingPathComponent("w"), socket: "", port: 0, advertise: ["192.168.1.20"]),
+            keys: TestKeys(), deviceName: "Mac mini"
+        ) { _ in }
+        welcome.start()
+        defer { welcome.stop() }
+        try await snapshot(WelcomeView(model: welcome), name: "welcome", dark: false)
+        try await snapshot(WelcomeView(model: welcome), name: "welcome-dark")
+    }
+
     @Test func enrolment() async throws {
         try await snapshot(
             EnrolmentSheet(
                 token: "mayid1.Qm9ndXNUb2tlbkZvclNuYXBzaG90c09ubHlOb3RSZWFsQm9ndXNUb2tlbkZvclNuYXBzaG90c09ubHkAAAAAAAAAMTAuMC4wLjI",
-                added: nil, onClose: {}),
+                added: nil, onAddByCode: { _ in nil }, onClose: {}),
             name: "enrolment")
     }
 

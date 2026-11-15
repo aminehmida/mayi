@@ -29,12 +29,16 @@ pub const MODE_PAIRING: u8 = 2;
 pub const MODE_ENROL: u8 = 3;
 /// Two vault devices of the same vault syncing.
 pub const MODE_DEVICE: u8 = 4;
+/// A vault device adding a new device that shows a join code. The roles of
+/// [`MODE_ENROL`] are reversed: the device with the vault connects.
+pub const MODE_JOIN: u8 = 5;
 
 /// Default TCP port a vault device listens on for other machines.
 pub const DEFAULT_PORT: u16 = 7462;
 
 const MACHINE_PREFIX: &str = "mayi1.";
 const DEVICE_PREFIX: &str = "mayid1.";
+const JOIN_PREFIX: &str = "mayij1.";
 /// Largest Noise message, and the authentication tag inside it.
 const MAX_MESSAGE: usize = 65535;
 const TAG_LEN: usize = 16;
@@ -64,19 +68,21 @@ pub fn fingerprint(public: &PublicKey) -> String {
     hex::encode(&Sha256::digest(public)[..8])
 }
 
-/// What a vault device hands to a machine that wants to pair: who the device
-/// is, where to reach it, and a one-time secret proving the machine was
-/// invited. It is pasted as text, so it carries a full 256-bit secret rather
-/// than a short code that would need a PAKE.
-/// What a token invites its holder to become.
+/// What a token invites its holder to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
-    /// A requester: may ask for secrets, stores none.
+    /// Become a requester: may ask for secrets, stores none.
     Machine,
-    /// A vault device: receives the whole vault.
+    /// Become a vault device: receives the whole vault.
     Device,
+    /// Add the device that issued it, which is waiting to receive the vault.
+    Join,
 }
 
+/// What one side hands the other to start pairing: who the issuer is, where
+/// to reach it, and a one-time secret proving the other side was invited. It
+/// is pasted as text or scanned, so it carries a full 256-bit secret rather
+/// than a short code that would need a PAKE.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PairingToken {
     pub kind: TokenKind,
@@ -102,6 +108,7 @@ impl PairingToken {
         let prefix = match self.kind {
             TokenKind::Machine => MACHINE_PREFIX,
             TokenKind::Device => DEVICE_PREFIX,
+            TokenKind::Join => JOIN_PREFIX,
         };
         format!("{prefix}{}", URL_SAFE_NO_PAD.encode(bytes))
     }
@@ -112,6 +119,8 @@ impl PairingToken {
             (TokenKind::Machine, body)
         } else if let Some(body) = token.strip_prefix(DEVICE_PREFIX) {
             (TokenKind::Device, body)
+        } else if let Some(body) = token.strip_prefix(JOIN_PREFIX) {
+            (TokenKind::Join, body)
         } else {
             return Err(invalid("not a Mayi pairing token"));
         };
@@ -162,7 +171,7 @@ fn builder<'a>(
 ) -> io::Result<snow::Builder<'a>> {
     let pattern = match (mode, psk) {
         (MODE_SESSION | MODE_DEVICE, None) => SESSION_PATTERN,
-        (MODE_PAIRING | MODE_ENROL, Some(_)) => PAIRING_PATTERN,
+        (MODE_PAIRING | MODE_ENROL | MODE_JOIN, Some(_)) => PAIRING_PATTERN,
         _ => return Err(invalid("unknown tunnel mode")),
     };
     let mut builder = snow::Builder::new(pattern.parse().map_err(noise_error)?)
@@ -428,6 +437,9 @@ mod tests {
         assert!(PairingToken::decode("mayi1.AAAA").is_err());
         let empty = PairingToken::new(TokenKind::Device, [1u8; 32], 1, vec![]);
         assert!(empty.encode().starts_with("mayid1."));
+        let join = PairingToken::new(TokenKind::Join, [3u8; 32], 50123, vec!["192.168.1.20".into()]);
+        assert!(join.encode().starts_with("mayij1."));
+        assert_eq!(PairingToken::decode(&join.encode()).unwrap(), join);
         assert_eq!(PairingToken::decode(&empty.encode()).unwrap(), empty);
     }
 

@@ -179,6 +179,23 @@ secure hardware). Still to do by hand:
 - [ ] Obtainium on your phone: token, the repository URL, "Include
       prereleases", install, and later an update.
 
+## Joining a vault from either side (v0.1.0-alpha.2)
+
+Tested: the core in both directions over real connections, the Mac setup
+model joining by showing a code, the phone adding a device by code on the
+emulator (with a fingerprint for a level 4 secret, the dev daemon playing
+the new device), and refusals of codes used the wrong way round. Still to do
+by hand:
+
+- [ ] Your case: on the Mac, Devices, "Join Another Vault…", then on the phone
+      Devices, "Add device", scan the Mac's code. The Mac should open with the
+      phone's secrets. (This needs both updated to alpha.2.)
+- [ ] The Mac's first launch with no vault shows the setup window, and
+      "Create New Vault…" still works.
+- [ ] Scanning with the phone's camera (the emulator could only type the code).
+- [ ] A phone cannot show a code or an invitation yet, so two phones cannot
+      join each other without a Mac.
+
 ## Decisions waiting for you
 
 - [ ] The first commit is made and pushed to the private repository

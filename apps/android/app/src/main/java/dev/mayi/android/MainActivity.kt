@@ -55,6 +55,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -271,6 +272,7 @@ private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit) {
     }
     var tab by remember { mutableIntStateOf(0) }
     var adding by remember { mutableStateOf(false) }
+    var addingDevice by remember { mutableStateOf(false) }
     val waiting = state.pending.size + state.notices.size
 
     Scaffold(
@@ -309,6 +311,12 @@ private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit) {
                     icon = { Icon(Icons.Filled.Add, contentDescription = null) },
                     text = { Text("Add") },
                 )
+            } else if (tab == 2) {
+                ExtendedFloatingActionButton(
+                    onClick = { addingDevice = true },
+                    icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                    text = { Text("Add device") },
+                )
             }
         },
     ) { padding ->
@@ -316,7 +324,7 @@ private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit) {
             when (tab) {
                 0 -> Requests(controller, state)
                 1 -> Secrets(controller, state, adding, scan) { adding = it }
-                2 -> Devices(controller, state)
+                2 -> Devices(controller, state, addingDevice, scan) { addingDevice = it }
                 else -> Activity(state.log)
             }
         }
@@ -718,9 +726,81 @@ private fun AddSecret(scan: ((String) -> Unit) -> Unit, onCancel: () -> Unit, on
 
 // --- Devices ----------------------------------------------------------------------
 
+/**
+ * Adding a device: the new one shows a code while it has no vault (a Mac in
+ * its setup window), and this phone scans it or takes it as text.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Devices(controller: MayiController, state: MayiController.State) {
+private fun AddDevice(controller: MayiController, scan: ((String) -> Unit) -> Unit, onClose: () -> Unit) {
+    var code by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var added by remember { mutableStateOf<String?>(null) }
     val scheme = MaterialTheme.colorScheme
+    val add = { text: String ->
+        busy = true
+        error = null
+        Thread {
+            val result = controller.addDevice(text)
+            busy = false
+            result.onSuccess { added = it }.onFailure { error = it.message }
+        }.start()
+    }
+    ModalBottomSheet(onDismissRequest = { if (!busy) onClose() }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(
+            Modifier.padding(horizontal = 24.dp).padding(bottom = 28.dp).imePadding().verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("Add a device", style = MaterialTheme.typography.titleLarge)
+            val name = added
+            if (name != null) {
+                Text("$name was added. It now holds a copy of every secret and can answer requests.", style = MaterialTheme.typography.bodyLarge)
+                Row {
+                    Spacer(Modifier.weight(1f))
+                    Button(onClick = onClose) { Text("Done") }
+                }
+                return@Column
+            }
+            Text(
+                "Start setting up Mayi on the new device. A Mac shows a code under Join Your Vault: scan it here.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Button(onClick = { scan { add(it) } }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Scan code")
+            }
+            OutlinedTextField(
+                code, { code = it }, Modifier.fillMaxWidth(), label = { Text("Or enter the code as text") },
+                placeholder = { Text("mayij1.…") }, textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                enabled = !busy, minLines = 2,
+            )
+            if (busy) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+                Text("Adding. If you have level 4 secrets, confirm with your fingerprint.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+            }
+            error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = scheme.error) }
+            Text(
+                "The new device receives the whole vault, so add only a device you own.",
+                style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onClose, enabled = !busy) { Text("Cancel") }
+                Button(onClick = { add(code) }, enabled = !busy && code.isNotBlank()) { Text("Add") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Devices(
+    controller: MayiController, state: MayiController.State, adding: Boolean, scan: ((String) -> Unit) -> Unit,
+    setAdding: (Boolean) -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    if (adding) AddDevice(controller, scan) { setAdding(false) }
     LazyColumn {
         state.syncStatus?.let { status ->
             item { Text(status, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
@@ -760,7 +840,7 @@ private fun Devices(controller: MayiController, state: MayiController.State) {
         if (state.machines.isEmpty()) {
             item {
                 Text(
-                    "None yet. Pair machines and add devices from Mayi on your Mac.",
+                    "None yet. Pair machines from Mayi on your Mac.",
                     style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
@@ -783,6 +863,8 @@ private fun Devices(controller: MayiController, state: MayiController.State) {
                 },
             )
         }
+        // Room for the Add button to float without covering the last row.
+        item { Spacer(Modifier.height(88.dp)) }
     }
 }
 

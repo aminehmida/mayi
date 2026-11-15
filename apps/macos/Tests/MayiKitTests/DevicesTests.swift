@@ -70,6 +70,58 @@ import Testing
         #expect(mac.rotationAdvice == "Rotate these secrets, which phone could read: FROM_MAC, FROM_PHONE, L1, L4.")
     }
 
+    /// The other way round: a new Mac shows a code in its setup window, and
+    /// the device that has the vault adds it.
+    @Test func aNewMacShowsACodeAndTheDeviceWithTheVaultAddsIt() async throws {
+        let dir = try scratch()
+        let phoneKeys = TestKeys()
+        let phone = try model(dir, "phone", keys: phoneKeys)
+        #expect(phone.saveSecret(name: "L1", level: 1, values: ["value": "one"], allow: [], maxGrantSecs: 60) == nil)
+        #expect(phone.saveSecret(name: "L4", level: 4, values: ["value": "four"], allow: [], maxGrantSecs: 60) == nil)
+
+        let macKeys = TestKeys()
+        let macPaths = MayiPaths(
+            home: dir.appendingPathComponent("mac"), socket: dir.appendingPathComponent("mac.sock").path, port: 0,
+            advertise: ["127.0.0.1"])
+        var outcome: Bool?
+        let welcome = WelcomeModel(paths: macPaths, keys: macKeys, deviceName: "mac") { created in outcome = created }
+        welcome.start()
+        let code = try #require(welcome.code)
+        #expect(code.hasPrefix("mayij1."))
+        #expect(!FileManager.default.fileExists(atPath: macPaths.vault.path), "nothing is created before a choice")
+
+        // A code from the new device is not an invitation, and the reverse.
+        #expect(await phone.addDevice(code: "mayid1.AAAA") != nil)
+        #expect(await phone.addDevice(code: code) == nil)
+        try await eventually { outcome == false }
+        #expect(phoneKeys.prompts == ["Add mac as a device of this vault"], "sharing level 4 keys asks the phone's owner")
+        #expect(Set(phone.devices.map(\.name)) == ["mac", "phone"])
+
+        let mac = AppModel(presence: FixedPresence())
+        try mac.start(keys: macKeys, paths: macPaths, deviceName: "mac")
+        #expect(mac.secrets.map(\.name) == ["L1", "L4"])
+        #expect(!mac.vaultIsEmpty)
+        let result = try await mayi(
+            ["run", "-s", "L4", "-r", "on the new Mac", "--", "sh", "-c", "echo ${#L4}"], socket: macPaths.socket)
+        #expect(result.out == "4\n")
+    }
+
+    @Test func anEmptyVaultCanBeSetAsideToJoinAnother() throws {
+        let dir = try scratch()
+        let mac = try model(dir, "mac", keys: TestKeys())
+        #expect(mac.vaultIsEmpty)
+        #expect(mac.setAsideEmptyVault() == nil)
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent("mac").path)
+        #expect(!files.contains("vault.db"))
+        #expect(files.contains { $0.hasPrefix("set-aside-") && $0.hasSuffix("-vault.db") }, "\(files)")
+
+        let full = try model(dir, "full", keys: TestKeys())
+        #expect(full.saveSecret(name: "T", level: 1, values: ["value": "x"], allow: [], maxGrantSecs: 60) == nil)
+        #expect(!full.vaultIsEmpty)
+        #expect(full.setAsideEmptyVault() == "This vault holds secrets or other devices, so Mayi will not replace it.")
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("full/vault.db").path))
+    }
+
     @Test func aRecoveryKeyRestoresAMacWhoseKeysChanged() async throws {
         let dir = try scratch()
         let mac = try model(dir, "mac", keys: TestKeys())

@@ -1,9 +1,10 @@
 //! Two vault devices over real TCP connections: a second device joins with
-//! an enrolment token, they sync, and a machine paired with one is accepted
-//! by the other.
+//! an enrolment token or by showing a join code, they sync, and a machine
+//! paired with one is accepted by the other.
 
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -12,7 +13,7 @@ use mayi_core::broker::{Approval, Broker, Notice, Prompt, Ui};
 use mayi_core::hardware::SoftwareKeys;
 use mayi_core::model::{Kind, Level, NewItem};
 use mayi_core::policy::Rules;
-use mayi_core::server::{join_vault, Server};
+use mayi_core::server::{join_vault, JoinCode, Server};
 use mayi_core::vault::Vault;
 use mayi_proto::noise::{self, PairingToken, MODE_PAIRING, MODE_SESSION};
 use mayi_proto::{read_frame, write_frame, Binding, ClientMsg, RunRequest, ServerMsg};
@@ -168,4 +169,78 @@ fn a_second_device_joins_syncs_and_serves_the_same_machines() {
     assert!(mac.server.broker().vault().remove_device(&phone_id).unwrap().is_some());
     let results = phone.server.sync_all().unwrap();
     assert_eq!(results[0].1.as_ref().unwrap_err(), "vault: not a device of this vault");
+}
+
+fn names(vault: &Vault) -> Vec<String> {
+    vault.list().unwrap().into_iter().map(|m| m.name).collect()
+}
+
+#[test]
+fn a_new_device_shows_a_code_and_the_device_with_the_vault_adds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let phone_vault =
+        Vault::create(&dir.path().join("phone.db"), Arc::new(SoftwareKeys::generate(|_| true)), "phone").unwrap();
+    phone_vault.put(item("L1", Level::Log)).unwrap();
+    phone_vault.put(item("L4", Level::Biometric)).unwrap();
+    let phone = serve(phone_vault);
+
+    let code = JoinCode::open(vec!["127.0.0.1".into()], 0, 60).unwrap();
+    let token = code.token();
+    assert!(token.starts_with("mayij1."));
+    let port = PairingToken::decode(&token).unwrap().port;
+
+    // Each kind of code works in one direction only.
+    let wrong_way =
+        join_vault(&dir.path().join("x.db"), Arc::new(SoftwareKeys::generate(|_| true)), "x", &token).map(|_| ());
+    assert!(wrong_way.unwrap_err().to_string().contains("waiting to join"));
+    let invitation = phone.server.start_enrolment(vec!["127.0.0.1".into()], phone.addr.port(), 60).unwrap();
+    assert!(phone.server.add_device_by_code(&invitation).unwrap_err().to_string().contains("new device"));
+
+    let mac_keys = Arc::new(SoftwareKeys::generate(|_| true));
+    let mac_path = dir.path().join("mac.db");
+    let cancelled = AtomicBool::new(false);
+    let mac_vault = thread::scope(|scope| {
+        let waiter = scope.spawn(|| code.wait(&mac_path, mac_keys.clone(), "mac", &cancelled));
+        // Someone without the code's secret does not end the wait.
+        let mut stranger = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stranger.write_all(&[5u8; 80]).unwrap();
+        drop(stranger);
+        assert_eq!(phone.server.add_device_by_code(&token).unwrap(), "mac");
+        waiter.join().unwrap().map_err(|e| e.to_string())
+    })
+    .unwrap();
+    drop(code);
+
+    assert_eq!(phone.ui.added.load(Ordering::SeqCst), 1);
+    assert_eq!(names(&mac_vault), ["L1", "L4"], "the vault arrives over the same tunnel");
+    let l4 = mac_vault.meta("L4").unwrap();
+    assert_eq!(&**mac_vault.reveal(&[&l4], "p").unwrap()[0].get("value").unwrap(), "L4-value");
+    let devices: Vec<String> = mac_vault.devices().unwrap().into_iter().map(|d| d.name).collect();
+    assert_eq!(devices, ["mac", "phone"]);
+
+    // The code is gone with its listener.
+    assert!(phone.server.add_device_by_code(&token).is_err());
+
+    // From then on the two sync as any two devices do.
+    phone.server.broker().vault().put(item("LATER", Level::Log)).unwrap();
+    let mac = serve(mac_vault);
+    let results = mac.server.sync_all().unwrap();
+    assert_eq!(results[0].0, "phone");
+    assert!(results[0].1.is_ok(), "{:?}", results[0].1);
+    assert!(mac.server.broker().vault().meta("LATER").is_ok());
+}
+
+#[test]
+fn a_join_code_can_be_cancelled_and_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let keys = || Arc::new(SoftwareKeys::generate(|_| true));
+    let cancelled = AtomicBool::new(true);
+    let code = JoinCode::open(vec!["127.0.0.1".into()], 0, 60).unwrap();
+    let outcome = code.wait(&dir.path().join("a.db"), keys(), "a", &cancelled).map(|_| ());
+    assert_eq!(outcome.unwrap_err().to_string(), "vault: cancelled");
+
+    let expired = JoinCode::open(vec!["127.0.0.1".into()], 0, 0).unwrap();
+    let outcome = expired.wait(&dir.path().join("b.db"), keys(), "b", &AtomicBool::new(false)).map(|_| ());
+    assert_eq!(outcome.unwrap_err().to_string(), "vault: the code expired");
+    assert!(!dir.path().join("b.db").exists());
 }

@@ -188,6 +188,27 @@ any level 4 secret exists. It replies `enrolled` with `device_id` and
 `wrapped_vk`. The new device unwraps the vault key with its hardware key,
 creates its copy of the vault, and syncs.
 
+### Joining by code (mode 5)
+
+The same exchange with the connection the other way round, so that the
+device that shows a code can be the one with a screen (a Mac) and the one
+that scans it the one with a camera (a phone), whichever of them is new.
+
+A device with no vault opens a listening port (any free one) and shows a
+join code, `mayij1.…`: the same layout as the other tokens, carrying the new
+device's static key, a one-time secret, the port and its addresses. A device
+that holds the vault redeems it: it connects in mode 5 with an `IKpsk2`
+handshake keyed by the secret, using its own vault static key. The new
+device then sends `enrol` and the existing one answers `enrolled`, exactly as
+in mode 3, including the biometric check for level 4 keys. Because the new
+device does not yet know where the other one listens, the first sync runs
+over the same tunnel, with the new device as caller.
+
+A join code lasts ten minutes, and a connection that fails the handshake
+does not end the wait. Each kind of code is refused in the wrong place: an
+invitation (`mayid1.`) is entered on the new device, a join code on the
+device that has the vault.
+
 ### Sync (mode 4)
 
 Either device can call the other. The callee accepts only tunnel keys that

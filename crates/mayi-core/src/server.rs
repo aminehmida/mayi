@@ -13,13 +13,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use mayi_proto::noise::{self, PairingToken, TokenKind, MODE_DEVICE, MODE_ENROL, MODE_PAIRING, MODE_SESSION};
+use mayi_proto::noise::{
+    self, PairingToken, TokenKind, MODE_DEVICE, MODE_ENROL, MODE_JOIN, MODE_PAIRING, MODE_SESSION,
+};
 use mayi_proto::{read_frame, write_frame, ClientMsg, Peer, RunRequest, ServerMsg};
 
-use crate::broker::{Broker, Outcome, Requester};
+use crate::broker::{Broker, Outcome, Requester, Ui};
+use crate::hardware::HardwareKeys;
 use crate::now_ms;
 use crate::sync::{self, DeviceMsg};
-use crate::vault::NewDevice;
+use crate::vault::{Bootstrap, NewDevice, Vault};
 
 /// How long a peer may take over the handshake before it is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -282,33 +285,9 @@ impl Server {
             if mode == MODE_ENROL {
                 // Sharing level 4 keys may wait on the owner's fingerprint.
                 stream.set_read_timeout(None)?;
-                let reply = match read_frame::<_, DeviceMsg>(&mut reader)? {
-                    Some(DeviceMsg::Enrol { name, device_pub, biometric_pub, noise_public }) if still_open => {
-                        let name = clean_name(&name);
-                        let new = (|| {
-                            Some(NewDevice {
-                                name: name.clone(),
-                                device_pub: hex::decode(device_pub).ok()?,
-                                biometric_pub: hex::decode(biometric_pub).ok()?,
-                                noise_public: Some(hex::decode(noise_public).ok()?.try_into().ok()?),
-                            })
-                        })();
-                        let prompt = format!("Add {name} as a device of this vault");
-                        match new.map(|new| vault.enrol_device(new, &prompt)) {
-                            Some(Ok(bootstrap)) => {
-                                self.broker.ui().device_added(&name);
-                                DeviceMsg::Enrolled {
-                                    device_id: bootstrap.device_id,
-                                    wrapped_vk: hex::encode(bootstrap.wrapped_vk),
-                                }
-                            }
-                            Some(Err(e)) => DeviceMsg::Error { message: e.to_string() },
-                            None => DeviceMsg::Error { message: "damaged enrolment request".into() },
-                        }
-                    }
-                    _ => DeviceMsg::Error { message: "enrolment failed".into() },
-                };
-                return write_frame(&mut *lock(&writer), &reply);
+                // The new device hears the outcome; there is no one else to tell.
+                let _outcome = admit_device(vault, self.broker.ui(), &mut reader, &mut *lock(&writer), still_open)?;
+                return Ok(());
             }
             let reply = match read_frame::<_, ClientMsg>(&mut reader)? {
                 Some(ClientMsg::Pair { name }) if still_open => {
@@ -501,21 +480,96 @@ fn sync_over(
     sync::sync_as_caller(vault, &mut reader, &mut writer)
 }
 
-/// Redeems an enrolment token: asks the device that issued it to admit this
-/// one, creates the local copy of the vault at `path`, and fills it with a
-/// first sync.
-pub fn join_vault(
-    path: &Path,
-    hw: Arc<dyn crate::hardware::HardwareKeys>,
+/// The half of adding a device done by a device that holds the vault: reads
+/// the newcomer's request, shares the vault key and any level 4 keys (which
+/// may wait on the owner's fingerprint) and answers. Returns the new
+/// device's name, or why it was not admitted.
+fn admit_device<R: Read, W: Write>(
+    vault: &Vault,
+    ui: &dyn Ui,
+    reader: &mut R,
+    writer: &mut W,
+    invited: bool,
+) -> io::Result<Result<String, String>> {
+    let refuse = |message: &str| (DeviceMsg::Error { message: message.into() }, Err(message.to_string()));
+    let (reply, outcome) = match read_frame::<_, DeviceMsg>(reader)? {
+        Some(DeviceMsg::Enrol { name, device_pub, biometric_pub, noise_public }) if invited => {
+            let name = clean_name(&name);
+            let new = (|| {
+                Some(NewDevice {
+                    name: name.clone(),
+                    device_pub: hex::decode(device_pub).ok()?,
+                    biometric_pub: hex::decode(biometric_pub).ok()?,
+                    noise_public: Some(hex::decode(noise_public).ok()?.try_into().ok()?),
+                })
+            })();
+            let prompt = format!("Add {name} as a device of this vault");
+            match new.map(|new| vault.enrol_device(new, &prompt)) {
+                Some(Ok(bootstrap)) => {
+                    ui.device_added(&name);
+                    let reply = DeviceMsg::Enrolled {
+                        device_id: bootstrap.device_id,
+                        wrapped_vk: hex::encode(bootstrap.wrapped_vk),
+                    };
+                    (reply, Ok(name))
+                }
+                Some(Err(e)) => refuse(&e.to_string()),
+                None => refuse("damaged enrolment request"),
+            }
+        }
+        _ => refuse("enrolment failed"),
+    };
+    write_frame(writer, &reply)?;
+    Ok(outcome)
+}
+
+/// The half of joining done by the new device: introduces itself and
+/// receives what it needs to open the vault.
+fn request_admission<R: Read, W: Write>(
+    hw: &dyn HardwareKeys,
     device_name: &str,
-    token: &str,
-) -> crate::Result<crate::vault::Vault> {
-    use crate::vault::{Bootstrap, Vault};
+    noise_public: &[u8; 32],
+    reader: &mut R,
+    writer: &mut W,
+) -> crate::Result<Bootstrap> {
+    write_frame(
+        writer,
+        &DeviceMsg::Enrol {
+            name: device_name.to_string(),
+            device_pub: hex::encode(hw.device_public()),
+            biometric_pub: hex::encode(hw.biometric_public()),
+            noise_public: hex::encode(noise_public),
+        },
+    )?;
+    match read_frame::<_, DeviceMsg>(reader)? {
+        Some(DeviceMsg::Enrolled { device_id, wrapped_vk }) => Ok(Bootstrap {
+            device_id,
+            wrapped_vk: hex::decode(wrapped_vk).map_err(|_| crate::Error::Crypto)?,
+        }),
+        Some(DeviceMsg::Error { message }) => Err(crate::Error::Vault(message)),
+        _ => Err(crate::Error::Vault("the other device did not answer the enrolment".into())),
+    }
+}
+
+/// Redeems an invitation from a device that holds the vault ("Add a
+/// device"): asks it to admit this one, creates the local copy of the vault
+/// at `path`, and fills it with a first sync.
+pub fn join_vault(path: &Path, hw: Arc<dyn HardwareKeys>, device_name: &str, token: &str) -> crate::Result<Vault> {
     let token = PairingToken::decode(token)?;
-    if token.kind != TokenKind::Device {
-        return Err(crate::Error::Vault(
-            "this token pairs a machine; a device needs the token from \"Add a device\"".into(),
-        ));
+    match token.kind {
+        TokenKind::Device => {}
+        TokenKind::Machine => {
+            return Err(crate::Error::Vault(
+                "this token pairs a machine; a device needs the token from \"Add a device\"".into(),
+            ))
+        }
+        TokenKind::Join => {
+            return Err(crate::Error::Vault(
+                "this code comes from a device that is waiting to join; enter it on a device that already has \
+                 your vault, under Add a Device"
+                    .into(),
+            ))
+        }
     }
     if path.exists() {
         return Err(crate::Error::Vault("this device already has a vault".into()));
@@ -530,29 +584,139 @@ pub fn join_vault(
         Some(&token.secret),
         ENROL_TIMEOUT,
     )?;
-    write_frame(
-        &mut writer,
-        &DeviceMsg::Enrol {
-            name: device_name.to_string(),
-            device_pub: hex::encode(hw.device_public()),
-            biometric_pub: hex::encode(hw.biometric_public()),
-            noise_public: hex::encode(public),
-        },
-    )?;
-    let bootstrap = match read_frame::<_, DeviceMsg>(&mut reader)? {
-        Some(DeviceMsg::Enrolled { device_id, wrapped_vk }) => Bootstrap {
-            device_id,
-            wrapped_vk: hex::decode(wrapped_vk).map_err(|_| crate::Error::Crypto)?,
-        },
-        Some(DeviceMsg::Error { message }) => return Err(crate::Error::Vault(message)),
-        _ => return Err(crate::Error::Vault("the other device did not answer the enrolment".into())),
-    };
+    let bootstrap = request_admission(&*hw, device_name, &public, &mut reader, &mut writer)?;
     let vault = Vault::join(path, hw, device_name, &bootstrap, (&private, &public))?;
     sync_over(&vault, &token.addresses, token.port, &token.device_public)?;
     Ok(vault)
 }
 
+/// A code shown by a device that wants to join a vault, for a device that
+/// holds the vault to scan or paste ([`Server::add_device_by_code`]). It is
+/// the other way round from [`join_vault`]: the new device waits on a port
+/// of its own and the one with the vault connects, so the device that shows
+/// a code can be the one with a screen and the one that scans it the one
+/// with a camera, whichever of them is new.
+pub struct JoinCode {
+    listener: TcpListener,
+    token: PairingToken,
+    private: noise::PrivateKey,
+    expires_at_ms: u64,
+}
+
+impl JoinCode {
+    /// Listens on `port` (0 picks a free one) and makes a code valid for
+    /// `ttl_secs`. `addresses` are where the other device should look for
+    /// this one; empty means this device's own network addresses.
+    pub fn open(addresses: Vec<String>, port: u16, ttl_secs: u64) -> crate::Result<Self> {
+        let listener = TcpListener::bind(("0.0.0.0", port))?;
+        listener.set_nonblocking(true)?;
+        let port = listener.local_addr()?.port();
+        let addresses = if addresses.is_empty() { local_addresses() } else { addresses };
+        let (private, public) = noise::generate_keypair()?;
+        let token = PairingToken::new(TokenKind::Join, public, port, addresses);
+        Ok(Self { listener, token, private, expires_at_ms: now_ms() + ttl_secs * 1000 })
+    }
+
+    pub fn token(&self) -> String {
+        self.token.encode()
+    }
+
+    /// Waits until a device with a vault adds this one, then creates the
+    /// local copy of the vault at `path` and fills it with a first sync.
+    /// Gives up when the code expires or `cancelled` is set.
+    pub fn wait(
+        &self,
+        path: &Path,
+        hw: Arc<dyn HardwareKeys>,
+        device_name: &str,
+        cancelled: &AtomicBool,
+    ) -> crate::Result<Vault> {
+        if path.exists() {
+            return Err(crate::Error::Vault("this device already has a vault".into()));
+        }
+        loop {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err(crate::Error::Vault("cancelled".into()));
+            }
+            if now_ms() >= self.expires_at_ms {
+                return Err(crate::Error::Vault("the code expired".into()));
+            }
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    // A connection that fails the handshake is not from the
+                    // device the code was shown to: keep waiting.
+                    let Ok((mut reader, mut writer)) = self.handshake(stream) else { continue };
+                    let public = self.token.device_public;
+                    let bootstrap = request_admission(&*hw, device_name, &public, &mut reader, &mut writer)?;
+                    let vault = Vault::join(path, hw, device_name, &bootstrap, (&self.private, &public))?;
+                    // The first sync goes over the same tunnel: this device
+                    // does not yet know where the other one listens.
+                    sync::sync_as_caller(&vault, &mut reader, &mut writer)?;
+                    return Ok(vault);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(100)),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    fn handshake(&self, mut stream: TcpStream) -> io::Result<Tunnel> {
+        stream.set_nonblocking(false)?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        if noise::read_mode(&mut stream)? != MODE_JOIN {
+            return Err(io::Error::other("not a join"));
+        }
+        let (transport, _) = noise::accept(&mut stream, MODE_JOIN, &self.private, Some(&self.token.secret))?;
+        // The other device may wait on its owner's fingerprint before answering.
+        stream.set_read_timeout(Some(ENROL_TIMEOUT))?;
+        Ok(noise::split(transport, stream.try_clone()?, stream))
+    }
+}
+
 impl Server {
+    /// Adds the device that shows `code` (a [`JoinCode`]): connects to it,
+    /// admits it, which may ask the owner for a fingerprint, and sends it the
+    /// vault. Returns its name.
+    pub fn add_device_by_code(&self, code: &str) -> crate::Result<String> {
+        let token = PairingToken::decode(code)?;
+        match token.kind {
+            TokenKind::Join => {}
+            TokenKind::Device => {
+                return Err(crate::Error::Vault(
+                    "this is an invitation to join a vault; enter it on the new device instead".into(),
+                ))
+            }
+            TokenKind::Machine => {
+                return Err(crate::Error::Vault(
+                    "this token pairs a machine; run `mayi pair` with it on that machine".into(),
+                ))
+            }
+        }
+        let vault = self.broker.vault();
+        let (private, _) = vault.noise_keypair()?;
+        let (mut reader, mut writer) = dial(
+            &token.addresses,
+            token.port,
+            MODE_JOIN,
+            &private,
+            &token.device_public,
+            Some(&token.secret),
+            ENROL_TIMEOUT,
+        )?;
+        let name = admit_device(vault, self.broker.ui(), &mut reader, &mut writer, true)?.map_err(crate::Error::Vault)?;
+        // The new device fills its copy over the same tunnel.
+        let Some(DeviceMsg::Digest { entries }) = read_frame::<_, DeviceMsg>(&mut reader)? else {
+            return Err(crate::Error::Vault(format!("{name} was added but has not synced yet")));
+        };
+        let changed = sync::sync_as_callee(vault, &entries, &mut reader, &mut writer)?;
+        if changed > 0 {
+            self.broker.ui().synced(changed);
+        }
+        Ok(name)
+    }
+
     /// Publishes where this device can be reached, for other devices and
     /// machines to find it. Returns whether that changed.
     pub fn announce(&self, port: u16, addresses: Vec<String>, wake: Option<mayi_proto::Wake>) -> crate::Result<bool> {

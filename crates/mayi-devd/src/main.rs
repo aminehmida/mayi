@@ -37,9 +37,10 @@ enum Cmd {
     Init,
     /// Regain access to the vault file with a recovery key, after losing this device's keys
     Recover { key: String },
-    /// Join an existing vault as another device, using the token from `add-device`
+    /// Join an existing vault as another device: with the token from `add-device`, or
+    /// without one, by showing a code for a device with the vault to add
     Join {
-        token: String,
+        token: Option<String>,
         #[arg(long, default_value = "dev-2")]
         name: String,
     },
@@ -135,9 +136,18 @@ fn recover(key: String) -> Res<()> {
     Ok(())
 }
 
-fn join(token: String, name: String) -> Res<()> {
+fn join(token: Option<String>, name: String) -> Res<()> {
     let (dir, keys) = new_keys()?;
-    let vault = mayi_core::server::join_vault(&dir.join("vault.db"), Arc::new(keys), &name, &token)?;
+    let path = dir.join("vault.db");
+    let vault = match token {
+        Some(token) => mayi_core::server::join_vault(&path, Arc::new(keys), &name, &token)?,
+        None => {
+            let code = mayi_core::server::JoinCode::open(advertised(), 0, 600)?;
+            eprintln!("on a device with the vault, choose Add a Device and enter this code within 10 minutes:");
+            println!("{}", code.token());
+            code.wait(&path, Arc::new(keys), &name, &std::sync::atomic::AtomicBool::new(false))?
+        }
+    };
     println!("Joined the vault as {name}; received {} secret(s).", vault.list()?.len());
     Ok(())
 }
@@ -404,7 +414,7 @@ fn serve(listen: Option<String>) -> Res<()> {
         .unwrap_or_else(|| home().join("mayi.sock"));
     let listener = Server::bind(&socket)?;
     eprintln!("mayi-devd (development only, not secure) listening on {}", socket.display());
-    eprintln!("Commands: `stop <run>`, `pair`, `machines`, `revoke <id>`, `add-device`, `devices`, `sync`.");
+    eprintln!("Commands: `stop <run>`, `pair`, `machines`, `revoke <id>`, `add-device [code]`, `devices`, `sync`.");
 
     let mut port = None;
     if let Some(address) = listen {
@@ -495,6 +505,15 @@ fn serve(listen: Option<String>) -> Res<()> {
                             Err(e) => eprintln!("could not open an invitation: {e}"),
                         },
                     },
+                    _ if line.trim().starts_with("add-device ") => {
+                        let code = line.trim()["add-device ".len()..].trim().to_string();
+                        // Admitting may wait for a typed fingerprint answer on this same stdin.
+                        let server = server.clone();
+                        thread::spawn(move || match server.add_device_by_code(&code) {
+                            Ok(name) => eprintln!("added {name} to the vault"),
+                            Err(e) => eprintln!("could not add the device: {e}"),
+                        });
+                    }
                     _ if line.trim() == "sync" => report_sync(&server),
                     _ if line.trim() == "devices" => {
                         for d in server.broker().vault().devices().unwrap_or_default() {
@@ -515,7 +534,7 @@ fn serve(listen: Option<String>) -> Res<()> {
                     }
                     _ if line.trim().is_empty() => {}
                     _ => eprintln!(
-                        "unknown command; try `stop <run>`, `pair`, `machines`, `revoke <id>`, `add-device`, `devices`, `remove-device <id>`, `recovery-key`, `sync`"
+                        "unknown command; try `stop <run>`, `pair`, `machines`, `revoke <id>`, `add-device [code]`, `devices`, `remove-device <id>`, `recovery-key`, `sync`"
                     ),
                 }
             }

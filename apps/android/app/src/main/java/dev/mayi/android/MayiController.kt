@@ -152,6 +152,23 @@ class MayiController(
 
     fun revokeMachine(id: String): String? = attempt { it.revokeMachine(id) }
 
+    /**
+     * Adds the device that shows [code], the code a new device shows while it
+     * has no vault. It receives the whole vault; a fingerprint is asked for if
+     * level 4 keys must be shared. Blocks: call off the main thread. Returns
+     * the new device's name.
+     */
+    fun addDevice(code: String): Result<String> {
+        val device = device ?: return Result.failure(IllegalStateException("The vault is not open."))
+        return try {
+            val name = device.addDeviceByCode(code.trim())
+            refresh()
+            Result.success(name)
+        } catch (e: MayiException) {
+            Result.failure(IllegalStateException(describe(e)))
+        }
+    }
+
     private fun attempt(action: (VaultDevice) -> Unit): String? {
         val device = device ?: return "The vault is not open."
         return try {

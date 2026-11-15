@@ -2,6 +2,7 @@ package dev.mayi.android
 
 import dev.mayi.ffi.ApprovalChoice
 import dev.mayi.ffi.KeyException
+import dev.mayi.ffi.JoinInvitation
 import dev.mayi.ffi.KeyStore
 import dev.mayi.ffi.joinVault
 import java.io.File
@@ -151,6 +152,32 @@ class ControllerTest {
         assertEquals(77, run.status)
         assertTrue(run.err, run.err.contains("github is a login"))
         assertTrue("refused before any prompt", controller.state.pending.isEmpty())
+    }
+
+    @Test
+    fun thePhoneAddsANewDeviceThatShowsACode() {
+        val phoneKeys = TestKeys()
+        val (phone, _) = phone(phoneKeys)
+        assertNull(phone.saveSecret("L4", 4u, mapOf("value" to "four"), emptyList(), 60u))
+
+        // What a new Mac's setup window does.
+        val join = JoinInvitation.open(listOf("127.0.0.1"), 60u)
+        val code = join.token()
+        assertTrue(code.startsWith("mayij1."))
+        val macKeys = TestKeys()
+        val macPath = File(dir, "mac.db").path
+        var failure: Throwable? = null
+        val waiter = Thread { runCatching { join.wait(macPath, "mac", macKeys) }.onFailure { failure = it } }.apply { start() }
+
+        assertTrue("an invitation is not a code", phone.addDevice("mayid1.AAAA").isFailure)
+        assertEquals("mac", phone.addDevice(code).getOrThrow())
+        waiter.join(10_000)
+        assertNull(failure)
+        assertEquals(listOf("Add mac as a device of this vault"), phoneKeys.prompts)
+        assertEquals(setOf("mac", "phone"), phone.state.devices.map { it.name }.toSet())
+
+        val mac = MayiController().apply { open(macPath, "mac", macKeys) }
+        assertEquals(listOf("L4"), mac.state.secrets.map { it.name })
     }
 
     @Test

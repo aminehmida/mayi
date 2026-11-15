@@ -17,7 +17,7 @@ it with secrets that matter.
 
 ## Install
 
-The current release is an alpha: `v0.1.0-alpha.1`. This repository is
+The current release is an alpha: `v0.1.0-alpha.2`. This repository is
 private, so every installer needs a GitHub token that can read it.
 
 ### Mac (Homebrew)
@@ -51,7 +51,7 @@ default branch. Two things need to reach it as aminehmida:
 On a server or a Mac without the app, `brew install aminehmida/mayi/mayi-cli`
 installs only the `mayi` command (macOS on Apple silicon, Linux on x86_64 or
 ARM). Without Homebrew:
-`gh release download v0.1.0-alpha.1 -R aminehmida/mayi -p 'mayi-*-x86_64-unknown-linux-musl.tar.gz'`.
+`gh release download v0.1.0-alpha.2 -R aminehmida/mayi -p 'mayi-*-x86_64-unknown-linux-musl.tar.gz'`.
 
 ### Android (Obtainium)
 
@@ -162,10 +162,20 @@ to a notification, and a request that gets no decision within 120 seconds
 
 ## More than one device
 
-In the Mac app, the Devices tab has "Add a Device…". It shows a QR code and
-text for the new device to scan or paste. The new device receives the whole
-vault; after that, a change on either reaches the other the next time they
-can connect (at start, every five minutes, and after each change).
+Either device can come first. The new one receives the whole vault; after
+that, a change on either reaches the other the next time they can connect
+(at start, every five minutes, and after each change).
+
+- **The phone has the vault, the Mac is new:** on first launch the Mac app
+  shows a QR code under "Join Your Vault". On the phone, open Devices, choose
+  "Add device" and scan it (or type the code).
+- **The Mac has the vault, the phone is new:** in the Mac app, Devices, "Add a
+  Device…" shows a QR code. On the phone, choose "Scan code from another
+  device".
+- **Two Macs:** paste one Mac's code into the other, either way round.
+
+A Mac that already started an empty vault of its own shows "Join Another
+Vault…" in Devices: Mayi sets the empty vault aside and restarts into setup.
 
 The Android app is in `apps/android`:
 

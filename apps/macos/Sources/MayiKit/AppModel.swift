@@ -142,6 +142,54 @@ public final class AppModel: ObservableObject {
 
     private var hasOtherDevices: Bool { devices.contains { !$0.thisDevice && !$0.removed && !$0.recovery } }
 
+    /// Asked to restart the app, after the vault was set aside to join another.
+    public var onRestart: (() -> Void)?
+
+    /// Whether this Mac's vault holds nothing yet, so joining another vault
+    /// instead loses nothing.
+    public var vaultIsEmpty: Bool {
+        secrets.isEmpty && !machines.contains { !$0.revoked } && !hasOtherDevices
+            && !devices.contains { $0.recovery && !$0.removed }
+    }
+
+    /// Moves this Mac's empty vault aside, so that the next launch offers to
+    /// join another. The file is kept, renamed, next to where it was.
+    public func setAsideEmptyVault() -> String? {
+        guard let paths else { return "The vault is not open." }
+        guard vaultIsEmpty else { return "This vault holds secrets or other devices, so Mayi will not replace it." }
+        let format = DateFormatter()
+        format.dateFormat = "yyyyMMdd-HHmmss"
+        let stamp = format.string(from: Date())
+        let fm = FileManager.default
+        do {
+            for name in try fm.contentsOfDirectory(atPath: paths.home.path)
+            where name == "vault.db" || name.hasPrefix("vault.db-") {
+                try fm.moveItem(
+                    at: paths.home.appendingPathComponent(name),
+                    to: paths.home.appendingPathComponent("set-aside-\(stamp)-\(name)"))
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// Adds the device that shows `code` (the code a new device shows while
+    /// it has no vault). It receives the whole vault; Touch ID is asked for
+    /// if level 4 keys must be shared with it.
+    public func addDevice(code: String) async -> String? {
+        guard let device else { return "The vault is not open." }
+        let code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { return "Paste the code the new device shows." }
+        do {
+            let name = try await Task.detached { try device.addDeviceByCode(code: code) }.value
+            deviceAdded(name: name)
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
     /// Opens an invitation for a new vault device after the user proves they
     /// are present. Returns an error message on failure.
     public func startEnrolment() async -> String? {
