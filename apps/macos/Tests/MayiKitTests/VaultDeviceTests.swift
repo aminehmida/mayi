@@ -1,0 +1,204 @@
+import Foundation
+import Security
+import Testing
+
+@testable import MayiKit
+
+@Suite struct VaultDeviceTests {
+    /// CryptoKit's ECDH output must be what the Rust core derives keys from.
+    @Test func swiftKeysOpenAVaultCreatedByTheCore() throws {
+        let dir = try scratch()
+        let keys = TestKeys()
+        let path = dir.appendingPathComponent("vault.db").path
+        do {
+            let device = try VaultDevice.open(vaultPath: path, deviceName: "test", keys: keys, ui: SilentUi())
+            _ = try device.putSecret(
+                name: "TOKEN", level: 3, values: ["value": "abc"], allow: ["make *"], maxGrantSecs: 60, login: false,
+                sites: [])
+            _ = try device.putSecret(
+                name: "PROD", level: 4, values: ["value": "xyz"], allow: [], maxGrantSecs: 60, login: false, sites: [])
+        }
+        let reopened = try VaultDevice.open(vaultPath: path, deviceName: "test", keys: keys, ui: SilentUi())
+        let secrets = try reopened.listSecrets()
+        #expect(secrets.map(\.name) == ["PROD", "TOKEN"])
+        #expect(secrets[1].allow == ["make *"])
+        #expect(keys.prompts.isEmpty, "writing and listing never ask for biometrics")
+
+        let updated = try reopened.updateRules(name: "PROD", allow: ["deploy"], maxGrantSecs: 120, sites: [])
+        #expect(updated.version > secrets[0].version && updated.level == 4)
+
+        #expect(throws: MayiError.self) {
+            _ = try VaultDevice.open(vaultPath: path, deviceName: "x", keys: TestKeys(), ui: SilentUi())
+        }
+    }
+
+    @Test func loginsKeepTheirWebsites() throws {
+        let dir = try scratch()
+        let device = try VaultDevice.open(
+            vaultPath: dir.appendingPathComponent("vault.db").path, deviceName: "test", keys: TestKeys(), ui: SilentUi())
+        let saved = try device.putSecret(
+            name: "github", level: 3,
+            values: ["username": "amine", "password": "pw", "totp": "JBSWY3DPEHPK3PXP"], allow: [],
+            maxGrantSecs: 600, login: true, sites: ["https://GitHub.com/login"])
+        #expect(saved.login && saved.sites == ["github.com"])
+        #expect(saved.fields == ["password", "totp", "username"])
+        let moved = try device.updateRules(name: "github", allow: [], maxGrantSecs: 60, sites: ["gitlab.com"])
+        #expect(moved.sites == ["gitlab.com"])
+        #expect(throws: MayiError.self) {
+            _ = try device.putSecret(
+                name: "bad", level: 3, values: ["password": "pw", "totp": "not a key!"], allow: [], maxGrantSecs: 0,
+                login: true, sites: ["a.com"])
+        }
+    }
+
+    /// The real Secure Enclave, as far as it goes without a fingerprint:
+    /// key generation, persistence, and unwrapping the vault key.
+    @Test(.enabled(if: SecureEnclaveKeys.isAvailable))
+    func secureEnclaveKeysPersistAndOpenTheVault() throws {
+        let dir = try scratch()
+        let keyDir = dir.appendingPathComponent("keys")
+        let path = dir.appendingPathComponent("vault.db").path
+        let first: SecureEnclaveKeys
+        do {
+            first = try SecureEnclaveKeys.loadOrCreate(directory: keyDir)
+        } catch let error as NSError where error.code == Int(errSecInteractionNotAllowed) {
+            // The Secure Enclave makes no keys while the Mac is locked.
+            return
+        }
+        #expect(first.devicePublic().count == 65 && first.biometricPublic().count == 65)
+        #expect(first.devicePublic() != first.biometricPublic())
+        do {
+            let device = try VaultDevice.open(vaultPath: path, deviceName: "mac", keys: first, ui: SilentUi())
+            _ = try device.putSecret(
+                name: "PROD", level: 4, values: ["value": "xyz"], allow: [], maxGrantSecs: 60, login: false, sites: [])
+        }
+
+        let second = try SecureEnclaveKeys.loadOrCreate(directory: keyDir)
+        #expect(second.devicePublic() == first.devicePublic())
+        #expect(second.biometricPublic() == first.biometricPublic())
+        let reopened = try VaultDevice.open(vaultPath: path, deviceName: "mac", keys: second, ui: SilentUi())
+        #expect(try reopened.listSecrets().map(\.name) == ["PROD"])
+
+        let mode = try FileManager.default.attributesOfItem(
+            atPath: keyDir.appendingPathComponent("biometric.sekey").path)[.posixPermissions] as? Int
+        #expect(mode == 0o600)
+    }
+}
+
+/// Not a test of its own: with MAYI_SMOKE_HOME set, fills a vault there using
+/// the real Secure Enclave keys, so the built app can be launched against it
+/// and exercised from the command line.
+@Suite struct SmokeVault {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["MAYI_SMOKE_HOME"] != nil))
+    func prepare() throws {
+        let home = URL(fileURLWithPath: ProcessInfo.processInfo.environment["MAYI_SMOKE_HOME"]!)
+        let paths = MayiPaths(home: home, socket: "")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let keys = try SecureEnclaveKeys.loadOrCreate(directory: paths.keys)
+        let device = try VaultDevice.open(
+            vaultPath: paths.vault.path, deviceName: "smoke", keys: keys, ui: SilentUi())
+        for level in UInt8(1)...4 {
+            _ = try device.putSecret(
+                name: "L\(level)", level: level, values: ["value": "smoke-secret-\(level)"], allow: [],
+                maxGrantSecs: 600, login: false, sites: [])
+        }
+        if let site = ProcessInfo.processInfo.environment["MAYI_SMOKE_SITE"] {
+            _ = try device.putSecret(
+                name: "smoke-login", level: 1,
+                values: ["username": "amine@example.com", "password": "hunter2-correct-horse"], allow: [],
+                maxGrantSecs: 600, login: true, sites: [site])
+        }
+    }
+}
+
+@Suite struct SecretDraftTests {
+    let stored = SecretRecord(
+        name: "DB", level: 4, fields: ["user", "password"], allow: ["psql *"], maxGrantSecs: 600, version: 1,
+        login: false, sites: [])
+    let storedLogin = SecretRecord(
+        name: "github", level: 3, fields: ["password", "totp", "username"], allow: [], maxGrantSecs: 600, version: 1,
+        login: true, sites: ["github.com"])
+
+    @Test func newSecretNeedsNameAndValues() {
+        var draft = SecretDraft()
+        #expect(draft.change(existing: nil) == .failure("Give the secret a name."))
+        draft.name = "TOKEN"
+        #expect(draft.change(existing: nil) == .failure("Enter a value for every field."))
+        draft.fields[0].value = "abc"
+        draft.allowText = "gh *\n\n  make deploy  "
+        draft.maxGrantMinutes = 5
+        #expect(
+            draft.change(existing: nil)
+                == .success(
+                    .put(
+                        name: "TOKEN", level: 3, values: ["value": "abc"], allow: ["gh *", "make deploy"],
+                        maxGrantSecs: 300, login: false, sites: [])))
+        draft.fields.append(.init(name: "value", value: "x"))
+        #expect(draft.change(existing: nil) == .failure("Field names must be different."))
+    }
+
+    @Test func editingWithoutValuesChangesOnlyRules() {
+        var draft = SecretDraft(editing: stored)
+        #expect(draft.maxGrantMinutes == 10)
+        draft.allowText = "psql *\npg_dump *"
+        #expect(
+            draft.change(existing: stored)
+                == .success(.rules(name: "DB", allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, sites: [])))
+    }
+
+    @Test func changingLevelOrFieldsNeedsValues() {
+        var draft = SecretDraft(editing: stored)
+        draft.level = 3
+        #expect(
+            draft.change(existing: stored)
+                == .failure("Changing the level re-encrypts the secret, so enter its values again."))
+        draft.fields[0].value = "admin"
+        #expect(draft.change(existing: stored) == .failure("Enter a value for every field."))
+        draft.fields[1].value = "pw"
+        #expect(
+            draft.change(existing: stored)
+                == .success(
+                    .put(
+                        name: "DB", level: 3, values: ["user": "admin", "password": "pw"], allow: ["psql *"],
+                        maxGrantSecs: 600, login: false, sites: [])))
+    }
+
+    @Test func newLoginNeedsAWebsiteAndAPassword() {
+        var draft = SecretDraft()
+        draft.login = true
+        draft.name = "github"
+        #expect(draft.change(existing: nil) == .failure("Add the website this login is for."))
+        draft.sitesText = "github.com\n\n *.github.com "
+        #expect(draft.change(existing: nil) == .failure("Enter the password."))
+        draft.username = " amine "
+        draft.password = "pw"
+        #expect(
+            draft.change(existing: nil)
+                == .success(
+                    .put(
+                        name: "github", level: 3, values: ["username": "amine", "password": "pw"], allow: [],
+                        maxGrantSecs: 900, login: true, sites: ["github.com", "*.github.com"])))
+        draft.twoFactorKey = "JBSW Y3DP"
+        guard case .success(.put(_, _, let values, _, _, _, _)) = draft.change(existing: nil) else {
+            Issue.record("expected a put")
+            return
+        }
+        #expect(values["totp"] == "JBSW Y3DP")
+    }
+
+    @Test func editingALoginWithoutValuesChangesOnlyItsWebsites() {
+        var draft = SecretDraft(editing: storedLogin)
+        #expect(draft.login && draft.sitesText == "github.com")
+        draft.sitesText = "github.com\ngist.github.com"
+        #expect(
+            draft.change(existing: storedLogin)
+                == .success(.rules(name: "github", allow: [], maxGrantSecs: 600, sites: ["github.com", "gist.github.com"])))
+        draft.username = "amine"
+        #expect(draft.change(existing: storedLogin) == .failure("Enter the password."))
+        draft.username = ""
+        draft.level = 4
+        #expect(
+            draft.change(existing: storedLogin)
+                == .failure("Changing the level re-encrypts the login, so enter its password again."))
+    }
+}

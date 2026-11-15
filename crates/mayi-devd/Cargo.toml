@@ -1,0 +1,11 @@
+[package]
+name = "mayi-devd"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mayi-proto.workspace = true
+mayi-core.workspace = true
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+zeroize = "1"

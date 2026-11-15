@@ -1,0 +1,8 @@
+<resources>
+    <!-- What shows for the instant before Compose draws: the ground colour, so nothing flashes. -->
+    <style name="Theme.Mayi" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/ground_light</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

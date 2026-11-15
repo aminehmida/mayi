@@ -1,0 +1,4 @@
+/.build
+/build
+/Sources/mayi_ffiFFI/include/mayi_ffiFFI.h
+/Sources/MayiKit/Generated/mayi_ffi.swift

@@ -1,0 +1,215 @@
+# Checks that need a person
+
+Automated tests cover the core, the Secure Enclave device key, and the whole
+request path from the CLI to the app's model. These are the parts they cannot
+reach. They are collected here to be done once, at the end of the project.
+
+## Mac app (milestone 2)
+
+Build and open the app first: `apps/macos/build.sh && open apps/macos/build/Mayi.app`.
+Below, `mayi` is `apps/macos/build/Mayi.app/Contents/Resources/mayi`.
+
+### Touch ID (needs the Touch ID keyboard connected)
+
+- [ ] Add a level 4 secret `PROD` in the app. No fingerprint is asked for.
+- [ ] `mayi run -s PROD -r test -- sh -c 'echo ${#PROD}'` shows the Touch ID
+      dialog with the command in its text, and prints the length after a touch.
+- [ ] The same command again within 5 minutes does not ask. A different
+      command does.
+- [ ] Cancelling the dialog makes the command fail with exit code 77.
+- [ ] Two level 4 secrets in one command (`-s A -s B`) ask for one touch, not two.
+- [ ] With the keyboard disconnected, the request fails cleanly instead of hanging.
+
+### Windows
+
+- [ ] A level 3 request shows the approval panel above other apps without
+      taking keyboard focus: typing continues to go to the app you were in.
+- [ ] Each button works on the first click: Deny, Allow Once, and both
+      entries under Allow for This Session.
+- [ ] Pressing Return in another app does not answer the prompt.
+- [ ] A level 2 request shows a notice at the top right; Stop kills a
+      long-running command (`-- sleep 30`) and the notice says it was stopped.
+- [ ] Secrets window: add, edit rules without re-entering values, replace
+      values, delete. The Activity tab lists what happened.
+- [ ] Quitting and reopening the app keeps the secrets.
+
+## Other machines (milestone 3)
+
+Automated tests paired the CLI with the app's model over loopback, and a
+static Linux binary in a container with the dev daemon on the Mac, with a
+packet capture showing no plaintext. Still to do by hand:
+
+- [ ] In the app, Machines → "Pair a Machine…" asks for Touch ID, then shows
+      the command. Cancelling Touch ID shows "Pairing needs your fingerprint."
+- [ ] The first pairing opens TCP port 7462. If the macOS firewall is on, it
+      asks whether Mayi may accept incoming connections: allow it.
+- [ ] Pair a real machine over Tailscale: copy `mayi` to it
+      (`scripts/build-linux.sh`), paste the command, and check it appears in
+      the Machines tab. The token lists this Mac's IPv4 addresses, including
+      its Tailscale address.
+- [ ] From that machine, a level 1 secret shows a notice naming the machine,
+      and a level 3 secret shows the approval panel with "Another machine".
+- [ ] Revoke the machine; its next request fails with "this machine is not paired".
+- [ ] With the Mac asleep or the app closed, a request from the machine fails
+      within a few seconds with "no vault device reachable".
+
+## Several devices and Android (milestone 4)
+
+Automated tests cover sync and enrolment in the core, two app models syncing
+on the Mac, and the Android app's logic on a desktop JVM. The Android app
+was also run on an emulator (Android 15, with a fingerprint enrolled) against
+a dev daemon playing the Mac, driven through its real screens:
+
+- joined the vault from an invitation and received the secrets;
+- served a paired machine at all four levels: notice with a working Stop,
+  approval and denial, fingerprint prompt accepted and cancelled;
+- raised a notification for an approval while in the background;
+- synced a secret added on the phone back to the other device;
+- kept its vault and resumed serving after being killed and restarted.
+
+An emulator has no secure hardware and never sleeps, so these remain:
+
+### On a real Android phone
+
+- [ ] `apps/android/build-core.sh && cd apps/android && ./gradlew installDebug`.
+      On a real phone the keys must land in secure hardware; the app refuses
+      to set up otherwise. (On the emulator a debug build accepts software
+      keys, which is the only reason it could be tested there.)
+- [ ] Join the Mac app's vault by scanning the QR code from Devices → "Add a
+      Device…". The emulator test pasted the text and used the dev daemon,
+      so the scanner and the Mac app's side of this are untested.
+- [ ] After adding or removing a fingerprint on the phone, level 4 secrets
+      can no longer be unlocked on it (by design).
+- [ ] The phone still answers after several minutes with the screen off.
+      Android's battery saving may stop it without the wake-up push.
+- [ ] The emulator, its Android 15 image and the virtual device `mayi` take
+      about 6 GB. Remove them when no longer needed with
+      `sdkmanager --uninstall emulator "system-images;android-35;google_apis;arm64-v8a"`
+      and by deleting `~/.android/avd/mayi.avd` and `~/.android/avd/mayi.ini`.
+
+### Wake-up push
+
+- [ ] Follow `services/wake/README.md`: Firebase project, service account,
+      KV namespace, deploy. This needs your accounts.
+- [ ] Build the app with `-Pmayi.wakeUrl=…` and `google-services.json`; the
+      Mac's Devices tab should then show the phone, and `mayi devices` on a
+      paired machine should say "can be woken".
+- [ ] With the phone asleep, a request from a machine wakes it and succeeds
+      within about 20 seconds.
+- [ ] The requester calls the gateway with `curl`, so `curl` must exist on
+      machines that should be able to wake a phone.
+
+## Agents, recovery and revocation (milestone 5)
+
+Automated tests cover the MCP server against a live daemon, creating a
+recovery key and recovering after the device keys were deleted, and the
+rotation lists. Still to do by hand:
+
+- [ ] Copy `skill/mayi` to `~/.claude/skills/` and ask Claude Code to do
+      something that needs a secret. Check it uses `mayi run` with a sensible
+      reason, and that it does not retry after you deny.
+- [ ] Add `mayi mcp` as an MCP server to a client (command: the path to
+      `mayi`, argument: `mcp`) and call both tools.
+- [ ] In the Mac app, Devices → "Recovery Key…" (Touch ID) shows a key once.
+      Store it for the next check.
+- [ ] Recovery for real: quit the app, move
+      `~/Library/Application Support/Mayi/keys` aside, relaunch. The app
+      should say it can no longer open the vault and accept the recovery key.
+      Level 4 secrets should work again afterwards.
+- [ ] Removing a device and revoking a machine each show which secrets to rotate.
+- [ ] The Android app has no screen for the recovery key or for recovering;
+      on a phone, recovery means joining again from another device.
+
+## Website logins
+
+`scripts/test-fill.py` signs in to a local test site in headless Chrome:
+one-page, three-page with a two-factor code, a code in six boxes, a
+script-driven form, shadow DOM, a decoy field, a form that only a button
+submits, and the refusals (password change form, another host, a login given
+to a command). With `MAYI_PLAYWRIGHT_DIR` set it also checks, with
+Playwright's own snapshot, that no password is left where an agent's browser
+tool would read it. The real Mac app (with Secure Enclave keys) served a
+sign-in, and on the emulator the phone approved a three-page sign-in and a
+level 4 one with a fingerprint. Two public practice sites were signed in to.
+Still to do by hand:
+
+- [ ] Sign in to a real account of yours that has two-factor, for example
+      GitHub: add the login in the app (scan or paste the two-factor key when
+      you set it up), then `mayi browser` and `mayi fill`.
+- [ ] The same from a real agent: Claude Code with Playwright MCP started as
+      `npx @playwright/mcp@latest --cdp-endpoint http://127.0.0.1:9222`, the
+      skill installed, and a task that needs the sign-in.
+- [ ] Level 4 sign-in with Touch ID on the Mac, and with a real phone.
+- [ ] The QR scanner for a two-factor key on a real phone.
+- [ ] `mayi fill` on a Linux machine or container with its own Chromium. I
+      built the static binaries, but Docker Desktop did not start for me (it
+      seemed to wait on something in its window, which is still open).
+- [ ] Decide whether `mayi fill` should also work with your everyday Chrome
+      through a Mayi browser extension, which tools like Claude in Chrome
+      would need. Not built.
+
+## Design
+
+Both apps now use their platform's own components (`docs/design-language.md`).
+The Mac main window was captured as a real window in tests, and the Android
+app was run on the emulator. Not yet tried by hand on the Mac:
+
+- [ ] The approval panel: the "Allow for This Session" pull-down opens and
+      works even though the panel never takes keyboard focus.
+- [ ] The toolbar buttons (edit, delete, add) and double-click to edit in the
+      Secrets list.
+- [ ] The menu-bar icon (the logo as a template) at real size, and the app
+      icon in the Dock and Finder.
+- [ ] On Android, the launcher icon and the themed (monochrome) icon.
+
+## The first release (v0.1.0-alpha.1)
+
+Built by `scripts/release.sh` and published by `scripts/publish.py` to the
+private repository `aminehmida/mayi`. The release APK was installed on the
+emulator and starts (it then refuses to create a vault, as it should without
+secure hardware). Still to do by hand:
+
+- [ ] Back up the Android signing key `~/.android/mayi-release.jks` and its
+      password (keychain item `mayi-android-release`). Losing either means
+      the next release cannot update installed copies.
+- [ ] Let git reach the tap as aminehmida (README, "Install"). I could not:
+      changing your global git credentials was refused by my permissions.
+- [ ] `brew tap` and `brew install --cask aminehmida/mayi/mayi`, then open
+      Mayi from Applications.
+- [ ] Obtainium on your phone: token, the repository URL, "Include
+      prereleases", install, and later an update.
+
+## Decisions waiting for you
+
+- [ ] The first commit is made and pushed to the private repository
+      `aminehmida/mayi`.
+- [ ] The name "Mayi" is unchecked for trademark, domain and package conflicts.
+- [ ] No licence has been chosen.
+- [ ] Level 4 uses `biometryCurrentSet`: adding or removing a fingerprint
+      makes this Mac's level 4 secrets unreadable until another device or the
+      recovery key (milestone 5) restores them. The looser alternative keeps
+      them readable across fingerprint changes.
+- [ ] Pairing in the app requires Touch ID, so a Mac whose Touch ID keyboard
+      is disconnected cannot pair a machine. Allowing the login password
+      instead is possible but weaker.
+- [ ] Pairing tokens are long text to paste, not a short code to type. A
+      short code would need an extra cryptographic library (a PAKE).
+- [ ] The vault key is never rotated, so removing a device or replacing the
+      recovery key cannot revoke access to secrets below level 4 that they
+      could already read. Rotating the vault key would close that; it is a
+      sizeable change (every device must receive the new key).
+- [ ] `~/Sources/mawaqit-old` (19 GB) was deleted at your request.
+- [ ] Devices do not find each other by mDNS yet; they use the addresses each
+      device publishes. That is reliable over Tailscale and on a network
+      where at least one side keeps its address.
+- [ ] On Android the biometric key stays usable for 10 seconds after a
+      fingerprint, because binding each single use to a fingerprint needs
+      Android 15. The Mac's key is per use.
+- [ ] Machines can be paired and devices added only from the Mac app so far;
+      the phone can join, approve, edit secrets and revoke.
+- [ ] Java (Temurin 21) was installed through mise for the Android build.
+- [ ] I started Docker Desktop to test the Linux binary and quit it afterwards.
+      I tried again for the website logins; its engine never answered and its
+      window may still be open.
+- [ ] The app does not start at login and is signed ad hoc, which is enough to
+      run it locally but not to distribute it.

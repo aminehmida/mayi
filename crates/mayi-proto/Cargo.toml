@@ -1,0 +1,16 @@
+[package]
+name = "mayi-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# Only the pure-Rust primitives the two patterns use: the default feature set
+# pulls in the C-based ring crate, which breaks static cross-compilation.
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-chacha20poly1305", "use-blake2", "use-curve25519", "use-getrandom"] }
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"

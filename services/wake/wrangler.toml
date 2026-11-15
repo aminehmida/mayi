@@ -1,0 +1,10 @@
+# The wake-up gateway: turns "wake device X" into an empty push.
+# Deploy with `npx wrangler deploy` after creating the KV namespace and
+# setting the three secrets (see README.md in this folder).
+name = "mayi-wake"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[[kv_namespaces]]
+binding = "DEVICES"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

@@ -1,0 +1,5 @@
+<resources>
+    <color name="icon_plate">#FFFFFF</color>
+    <color name="ground_light">#FAF9FD</color>
+    <color name="ground_dark">#121317</color>
+</resources>
