@@ -22,8 +22,8 @@ android {
         // Android 12: key agreement with keys held in the Android Keystore.
         minSdk = 31
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.0-alpha.2"
+        versionCode = 3
+        versionName = "0.1.0-alpha.3"
         buildConfigField("String", "WAKE_URL", "\"$wakeUrl\"")
         // The ABIs build-core.sh builds the Rust core for. Without this the APK
         // would claim every ABI JNA ships, and crash on the others.
@@ -80,6 +80,8 @@ dependencies {
     implementation("net.java.dev.jna:jna:5.17.0@aar")
     // The QR scanner: Google's code scanner UI, which needs no camera permission.
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // Draws the QR codes this phone shows: invitations, join codes.
+    implementation("com.google.zxing:core:3.5.3")
     implementation("com.google.firebase:firebase-messaging:24.1.0")
 
     testImplementation("junit:junit:4.13.2")

@@ -45,6 +45,9 @@ cp .build/release/Mayi "$app/Contents/MacOS/Mayi"
 cp "$root/target/release/mayi" "$app/Contents/Resources/mayi"
 cp -R "$root/skill" "$app/Contents/Resources/skill"
 cp Info.plist "$app/Contents/Info.plist"
+# The full version (with -alpha.N), shown in the menu; Cargo.toml is the source.
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -1)
+/usr/libexec/PlistBuddy -c "Add :MayiVersion string $version" "$app/Contents/Info.plist"
 cp Mayi.icns "$app/Contents/Resources/Mayi.icns"
 # Ad-hoc signature: enough to run locally, not to distribute.
 codesign --force --sign - "$app"

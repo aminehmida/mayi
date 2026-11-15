@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 import Testing
@@ -80,8 +81,39 @@ import Testing
         #expect(try reopened.listSecrets().map(\.name) == ["PROD"])
 
         let mode = try FileManager.default.attributesOfItem(
-            atPath: keyDir.appendingPathComponent("biometric.sekey").path)[.posixPermissions] as? Int
+            atPath: keyDir.appendingPathComponent("presence.sekey").path)[.posixPermissions] as? Int
         #expect(mode == 0o600)
+        #expect(first.acceptsPassword)
+    }
+
+    /// A Mac set up by an earlier version keeps its fingerprint-only level 4
+    /// key while a vault depends on it, and gets one that also accepts the
+    /// password once it starts over.
+    @Test(.enabled(if: SecureEnclaveKeys.isAvailable))
+    func anOlderFingerprintOnlyKeyIsKeptUntilTheVaultStartsOver() throws {
+        let keyDir = try scratch().appendingPathComponent("keys")
+        try FileManager.default.createDirectory(at: keyDir, withIntermediateDirectories: true)
+        var error: Unmanaged<CFError>?
+        let control = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet], &error)!
+        let older: SecureEnclave.P256.KeyAgreement.PrivateKey
+        do {
+            older = try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: control)
+        } catch let error as NSError where error.code == Int(errSecInteractionNotAllowed) {
+            return
+        }
+        try older.dataRepresentation.write(to: keyDir.appendingPathComponent("biometric.sekey"))
+
+        let kept = try SecureEnclaveKeys.loadOrCreate(directory: keyDir)
+        #expect(!kept.acceptsPassword)
+        #expect(kept.biometricPublic() == older.publicKey.x963Representation)
+
+        let fresh = try SecureEnclaveKeys.loadOrCreate(directory: keyDir, freshVault: true)
+        #expect(fresh.acceptsPassword)
+        #expect(fresh.biometricPublic() != older.publicKey.x963Representation)
+        #expect(fresh.devicePublic() == kept.devicePublic(), "the device key, and so the device's identity, stays")
+        let after = try SecureEnclaveKeys.loadOrCreate(directory: keyDir)
+        #expect(after.biometricPublic() == fresh.biometricPublic(), "the new key is used from then on")
     }
 }
 

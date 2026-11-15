@@ -1,8 +1,11 @@
 package dev.mayi.android
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.text.format.DateUtils
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -48,6 +51,9 @@ import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -76,6 +82,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -84,6 +91,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
@@ -95,6 +103,8 @@ import androidx.fragment.app.FragmentActivity
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.mayi.ffi.ApprovalChoice
 import dev.mayi.ffi.AuditRecord
+import dev.mayi.ffi.DeviceInfo
+import dev.mayi.ffi.JoinInvitation
 import dev.mayi.ffi.PromptInfo
 import dev.mayi.ffi.SecretRecord
 import java.text.DateFormat
@@ -103,9 +113,12 @@ import java.util.Date
 
 class MainActivity : FragmentActivity() {
     private val app get() = application as MayiApp
+    /** Bumped on every resume, so screens re-check settings changed meanwhile. */
+    private val resumes = androidx.compose.runtime.mutableIntStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        app.ensureServing()
         enableEdgeToEdge()
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
@@ -114,7 +127,7 @@ class MainActivity : FragmentActivity() {
             MayiTheme {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     var ready by remember { mutableStateOf(app.hasVault) }
-                    if (ready) Home(app, ::scan) else Setup(app, ::scan) { ready = true }
+                    if (ready) Home(app, ::scan, resumes) else Setup(app, ::scan) { ready = true }
                 }
             }
         }
@@ -122,6 +135,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onResume() {
         super.onResume()
+        resumes.intValue++
         app.foreground = this
     }
 
@@ -162,6 +176,8 @@ private fun EmptyState(icon: ImageVector, title: String, detail: String) {
 private fun Setup(app: MayiApp, scan: ((String) -> Unit) -> Unit, onReady: () -> Unit) {
     var token by remember { mutableStateOf("") }
     var pasting by remember { mutableStateOf(false) }
+    var showingCode by remember { mutableStateOf(false) }
+    var confirmCreate by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     val quiet = MaterialTheme.colorScheme.onSurfaceVariant
@@ -198,6 +214,12 @@ private fun Setup(app: MayiApp, scan: ((String) -> Unit) -> Unit, onReady: () ->
             )
             return@Column
         }
+        if (showingCode) {
+            JoinCodePanel(app, onJoined = onReady, onBack = { showingCode = false })
+            return@Column
+        }
+        Text("Join the vault you already have", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(12.dp))
         Button(
             onClick = {
                 scan { scanned ->
@@ -215,7 +237,16 @@ private fun Setup(app: MayiApp, scan: ((String) -> Unit) -> Unit, onReady: () ->
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            "In Mayi on a device that has your vault, choose Add a Device.",
+            "On a Mac with your vault: Devices, Add a Device. On a phone: Devices, Add device, Show an invitation.",
+            style = MaterialTheme.typography.bodySmall, color = quiet,
+        )
+        Spacer(Modifier.height(16.dp))
+        OutlinedButton(onClick = { showingCode = true }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Text("Show a code for your other device")
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "For another phone with your vault to scan, or a Mac to paste.",
             style = MaterialTheme.typography.bodySmall, color = quiet,
         )
         Spacer(Modifier.height(16.dp))
@@ -241,10 +272,89 @@ private fun Setup(app: MayiApp, scan: ((String) -> Unit) -> Unit, onReady: () ->
             Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
         }
         Spacer(Modifier.height(32.dp))
-        TextButton(onClick = { run { app.createVault() } }, enabled = !busy, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+        TextButton(onClick = { confirmCreate = true }, enabled = !busy, modifier = Modifier.align(Alignment.CenterHorizontally)) {
             Text("No vault yet? Create one on this phone")
         }
         Spacer(Modifier.height(24.dp))
+    }
+    if (confirmCreate) {
+        AlertDialog(
+            onDismissRequest = { confirmCreate = false },
+            title = { Text("Create a new vault?") },
+            text = { Text("If your secrets are on a Mac or another phone, join that vault instead. Two vaults share nothing.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmCreate = false
+                    run { app.createVault() }
+                }) { Text("Create") }
+            },
+            dismissButton = { TextButton(onClick = { confirmCreate = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** A code, as a QR code and as text, with the usual ways to pass it on. */
+@Composable
+private fun CodeToPass(code: String, label: String, qr: Boolean = true) {
+    val context = LocalContext.current
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+        if (qr) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { QrCode(code) }
+        CodeWell(code, maxLines = 4)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { copyText(context, label, code) }) { Text("Copy") }
+            OutlinedButton(onClick = { shareText(context, code) }) { Text("Share") }
+        }
+    }
+}
+
+/**
+ * This phone, with no vault, shows a code; a device that has the vault scans
+ * or pastes it and sends the vault here. A fresh code replaces an expired one.
+ */
+@Composable
+private fun JoinCodePanel(app: MayiApp, onJoined: () -> Unit, onBack: () -> Unit) {
+    var code by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var round by remember { mutableIntStateOf(0) }
+    DisposableEffect(round) {
+        var invitation: JoinInvitation? = null
+        var leaving = false
+        Thread {
+            try {
+                val opened = app.openJoinCode()
+                invitation = opened
+                code = opened.token()
+                val problem = app.joinByCode(opened)
+                if (leaving) return@Thread
+                if (problem == null) {
+                    onJoined()
+                } else {
+                    if (!problem.contains("expired")) error = "Not joined: $problem"
+                    round++
+                }
+            } catch (e: Exception) {
+                error = MayiController.describe(e)
+            }
+        }.start()
+        onDispose {
+            leaving = true
+            invitation?.cancel()
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Show this to your other device", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "On a phone with your vault: Devices, Add device, Scan its code. On a Mac: Devices, Add a Device, then paste the code.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        code?.let { CodeToPass(it, "Mayi code") }
+        LinearProgressIndicator(Modifier.fillMaxWidth())
+        Text(
+            "Waiting for your other device. It asks you to confirm, then sends this phone the vault.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
+        TextButton(onClick = onBack) { Text("Back") }
     }
 }
 
@@ -261,7 +371,7 @@ private val tabs = listOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit) {
+private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit, resumes: MutableIntState) {
     val controller = app.controller
     var state by remember { mutableStateOf(controller.state) }
     DisposableEffect(controller) {
@@ -322,9 +432,9 @@ private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit) {
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (tab) {
-                0 -> Requests(controller, state)
+                0 -> Requests(controller, state, notificationsBlocked = remember(resumes.intValue) { app.notificationsBlocked })
                 1 -> Secrets(controller, state, adding, scan) { adding = it }
-                2 -> Devices(controller, state, addingDevice, scan) { addingDevice = it }
+                2 -> Devices(app, controller, state, addingDevice, scan) { addingDevice = it }
                 else -> Activity(state.log)
             }
         }
@@ -334,15 +444,37 @@ private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit) {
 // --- Requests ---------------------------------------------------------------------
 
 @Composable
-private fun Requests(controller: MayiController, state: MayiController.State) {
-    if (state.pending.isEmpty() && state.notices.isEmpty()) {
-        EmptyState(Icons.Outlined.Notifications, "Nothing is waiting for you", "When an agent needs your say, its request appears here.")
-        return
-    }
-    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        items(state.pending, key = { "p${it.runId}" }) { prompt -> RequestCard(prompt) { controller.answer(prompt.runId, it) } }
-        items(state.notices, key = { "n${it.notice.runId}" }) { active ->
-            NoticeCard(active, onStop = { controller.stop(active.notice.runId) }, onDismiss = { controller.dismiss(active.notice.runId) })
+private fun Requests(controller: MayiController, state: MayiController.State, notificationsBlocked: Boolean) {
+    val context = LocalContext.current
+    Column {
+        if (notificationsBlocked) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Notifications are off", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Requests that arrive while Mayi is in the background cannot reach you, and time out.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Button(onClick = {
+                        context.startActivity(
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+                        )
+                    }) { Text("Turn on") }
+                }
+            }
+        }
+        if (state.pending.isEmpty() && state.notices.isEmpty()) {
+            EmptyState(Icons.Outlined.Notifications, "Nothing is waiting for you", "When an agent needs your say, its request appears here.")
+            return@Column
+        }
+        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(state.pending, key = { "p${it.runId}" }) { prompt -> RequestCard(prompt) { controller.answer(prompt.runId, it) } }
+            items(state.notices, key = { "n${it.notice.runId}" }) { active ->
+                NoticeCard(active, onStop = { controller.stop(active.notice.runId) }, onDismiss = { controller.dismiss(active.notice.runId) })
+            }
         }
     }
 }
@@ -513,6 +645,7 @@ private fun Secrets(
     setAdding: (Boolean) -> Unit,
 ) {
     var detail by remember { mutableStateOf<SecretRecord?>(null) }
+    var editing by remember { mutableStateOf<SecretRecord?>(null) }
     var deleting by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val scheme = MaterialTheme.colorScheme
@@ -548,14 +681,21 @@ private fun Secrets(
             onDismissRequest = { setAdding(false) },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
-            AddSecret(scan = scan, onCancel = { setAdding(false) }) { draft ->
-                val problem = controller.saveSecret(
-                    draft.name, draft.level, draft.values, draft.allow, 900u, draft.login, draft.sites,
-                )
-                if (problem == null) {
-                    Thread { controller.sync() }.start()
-                    setAdding(false)
-                }
+            AddSecret(scan = scan, existing = null, onCancel = { setAdding(false) }) { draft ->
+                val problem = save(controller, draft)
+                if (problem == null) setAdding(false)
+                problem
+            }
+        }
+    }
+    editing?.let { secret ->
+        ModalBottomSheet(
+            onDismissRequest = { editing = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
+            AddSecret(scan = scan, existing = secret, onCancel = { editing = null }) { draft ->
+                val problem = save(controller, draft)
+                if (problem == null) editing = null
                 problem
             }
         }
@@ -574,13 +714,19 @@ private fun Secrets(
                 )
                 Text(summary(secret) + ".", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(4.dp))
-                OutlinedButton(
-                    onClick = {
-                        deleting = secret.name
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        editing = secret
                         detail = null
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = scheme.error),
-                ) { Text(if (secret.login) "Delete login" else "Delete secret") }
+                    }) { Text("Edit") }
+                    OutlinedButton(
+                        onClick = {
+                            deleting = secret.name
+                            detail = null
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = scheme.error),
+                    ) { Text(if (secret.login) "Delete login" else "Delete secret") }
+                }
             }
         }
     }
@@ -601,33 +747,58 @@ private fun Secrets(
     }
 }
 
-/** What the add sheet produces. */
+/** What the add or edit sheet produces. [values] empty means keep the stored values. */
 private class NewSecret(
     val name: String, val level: UByte, val values: Map<String, String>, val allow: List<String>,
-    val login: Boolean, val sites: List<String>,
+    val maxGrantSecs: ULong, val login: Boolean, val sites: List<String>,
 )
 
 private fun lines(text: String) = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
-/** Returns an error message from [onSave] to keep the sheet open and show it. */
+/** Stores a draft: new values, or only the rules when no value was entered. */
+private fun save(controller: MayiController, draft: NewSecret): String? {
+    val problem = if (draft.values.isEmpty()) {
+        controller.updateRules(draft.name, draft.allow, draft.maxGrantSecs, draft.sites)
+    } else {
+        controller.saveSecret(draft.name, draft.level, draft.values, draft.allow, draft.maxGrantSecs, draft.login, draft.sites)
+    }
+    if (problem == null) Thread { controller.sync() }.start()
+    return problem
+}
+
+private val grantChoices = listOf(0uL to "Every time", 300uL to "5 min", 900uL to "15 min", 3600uL to "1 hour")
+
+/**
+ * Adds a secret or a login, or edits [existing]. When editing, leaving every
+ * value empty keeps what is stored and changes only the rules. Returns an
+ * error message from [onSave] to keep the sheet open and show it.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddSecret(scan: ((String) -> Unit) -> Unit, onCancel: () -> Unit, onSave: (NewSecret) -> String?) {
-    var login by remember { mutableStateOf(false) }
-    var name by remember { mutableStateOf("") }
+private fun AddSecret(
+    scan: ((String) -> Unit) -> Unit, existing: SecretRecord?, onCancel: () -> Unit, onSave: (NewSecret) -> String?,
+) {
+    val editing = existing != null
+    var login by remember { mutableStateOf(existing?.login ?: false) }
+    var name by remember { mutableStateOf(existing?.name ?: "") }
     var value by remember { mutableStateOf("") }
-    var allow by remember { mutableStateOf("") }
-    var sites by remember { mutableStateOf("") }
+    var allow by remember { mutableStateOf(existing?.allow?.joinToString("\n") ?: "") }
+    var sites by remember { mutableStateOf(existing?.sites?.joinToString("\n") ?: "") }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var twoFactor by remember { mutableStateOf("") }
-    var level by remember { mutableIntStateOf(3) }
+    var level by remember { mutableIntStateOf(existing?.level?.toInt() ?: 3) }
+    var maxGrant by remember { mutableStateOf(existing?.maxGrantSecs ?: 900uL) }
     var error by remember { mutableStateOf<String?>(null) }
     val scheme = MaterialTheme.colorScheme
     val mono = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace)
+    // This sheet edits one value; a secret with several fields keeps its values here.
+    val severalFields = existing != null && !existing.login && existing.fields != listOf("value")
+    val keep = if (editing) "unchanged" else null
     val secretField = @Composable { text: String, set: (String) -> Unit, label: String, trailing: (@Composable () -> Unit)? ->
         OutlinedTextField(
             text, set, Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true,
+            placeholder = keep?.let { hint -> { Text(hint) } },
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             trailingIcon = trailing,
@@ -637,26 +808,38 @@ private fun AddSecret(scan: ((String) -> Unit) -> Unit, onCancel: () -> Unit, on
         Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp).imePadding().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Text(if (login) "New login" else "New secret", style = MaterialTheme.typography.titleLarge)
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            listOf(false to "Secret", true to "Website login").forEachIndexed { index, (isLogin, label) ->
-                SegmentedButton(
-                    selected = login == isLogin, onClick = { login = isLogin },
-                    shape = SegmentedButtonDefaults.itemShape(index, 2),
-                ) { Text(label) }
-            }
-        }
-        OutlinedTextField(
-            name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Name") },
-            placeholder = { Text(if (login) "github" else "GITHUB_TOKEN") }, textStyle = mono, singleLine = true,
+        Text(
+            when {
+                existing != null -> "Edit ${existing.name}"
+                login -> "New login"
+                else -> "New secret"
+            },
+            style = MaterialTheme.typography.titleLarge,
         )
+        if (!editing) {
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                listOf(false to "Secret", true to "Website login").forEachIndexed { index, (isLogin, label) ->
+                    SegmentedButton(
+                        selected = login == isLogin, onClick = { login = isLogin },
+                        shape = SegmentedButtonDefaults.itemShape(index, 2),
+                    ) { Text(label) }
+                }
+            }
+            OutlinedTextField(
+                name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Name") },
+                placeholder = { Text(if (login) "github" else "GITHUB_TOKEN") }, textStyle = mono, singleLine = true,
+            )
+        }
         if (login) {
             OutlinedTextField(
                 sites, { sites = it }, Modifier.fillMaxWidth(), label = { Text("Websites, one per line") },
                 placeholder = { Text("github.com") }, textStyle = mono, minLines = 1,
                 supportingText = { Text("As the address bar shows them. *.example.com covers its subdomains. Typed into these sites only, over https.") },
             )
-            OutlinedTextField(username, { username = it }, Modifier.fillMaxWidth(), label = { Text("Username (optional)") }, singleLine = true)
+            OutlinedTextField(
+                username, { username = it }, Modifier.fillMaxWidth(), label = { Text("Username (optional)") }, singleLine = true,
+                placeholder = keep?.let { hint -> { Text(hint) } },
+            )
             secretField(password, { password = it }, "Password", null)
             secretField(twoFactor, { twoFactor = it }, "Two-factor key (optional)") {
                 IconButton(onClick = { scan { twoFactor = it } }) {
@@ -664,11 +847,23 @@ private fun AddSecret(scan: ((String) -> Unit) -> Unit, onCancel: () -> Unit, on
                 }
             }
             Text(
-                "The two-factor key is what a site shows when you turn on an authenticator app: scan its QR code, or paste the key. It stays on your devices; a page only ever gets the current code.",
+                if (editing) "Leave all three empty to keep what is stored. Changing the level needs the password again."
+                else "The two-factor key is what a site shows when you turn on an authenticator app: scan its QR code, or paste the key. It stays on your devices; a page only ever gets the current code.",
                 style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
+            )
+        } else if (severalFields) {
+            Text(
+                "This secret holds ${existing?.fields?.joinToString()}. Change its values on your Mac; here, its rules.",
+                style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
             )
         } else {
             secretField(value, { value = it }, "Value", null)
+            if (editing) {
+                Text(
+                    "Leave empty to keep what is stored. Changing the level needs the value again.",
+                    style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
+                )
+            }
         }
         Column {
             Text("Level", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(bottom = 4.dp))
@@ -676,12 +871,12 @@ private fun AddSecret(scan: ((String) -> Unit) -> Unit, onCancel: () -> Unit, on
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .selectable(selected = level == step, role = Role.RadioButton, onClick = { level = step })
+                        .selectable(selected = level == step, role = Role.RadioButton, enabled = !severalFields, onClick = { level = step })
                         .padding(vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    RadioButton(selected = level == step, onClick = null)
+                    RadioButton(selected = level == step, onClick = null, enabled = !severalFields)
                     Icon(levelIcon(step), contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                     Column {
                         Text(levelNames[step - 1], style = MaterialTheme.typography.bodyLarge)
@@ -690,6 +885,14 @@ private fun AddSecret(scan: ((String) -> Unit) -> Unit, onCancel: () -> Unit, on
                             style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
                         )
                     }
+                }
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("An approval lasts at most", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for ((secs, label) in grantChoices) {
+                    FilterChip(selected = maxGrant == secs, onClick = { maxGrant = secs }, label = { Text(label) })
                 }
             }
         }
@@ -706,20 +909,32 @@ private fun AddSecret(scan: ((String) -> Unit) -> Unit, onCancel: () -> Unit, on
             TextButton(onClick = onCancel) { Text("Cancel") }
             Button(
                 onClick = {
-                    val draft = if (login) {
-                        val values = buildMap {
+                    val values: Map<String, String> = when {
+                        login && editing && username.isEmpty() && password.isEmpty() && twoFactor.isEmpty() -> emptyMap()
+                        login -> buildMap {
                             put("password", password)
                             if (username.isNotBlank()) put("username", username.trim())
                             if (twoFactor.isNotBlank()) put("totp", twoFactor.trim())
                         }
-                        NewSecret(name.trim(), level.toUByte(), values, emptyList(), true, lines(sites))
-                    } else {
-                        NewSecret(name.trim(), level.toUByte(), mapOf("value" to value), lines(allow), false, emptyList())
+                        editing && value.isEmpty() -> emptyMap()
+                        else -> mapOf("value" to value)
                     }
-                    error = onSave(draft)
+                    error = when {
+                        name.isBlank() -> "Give it a name."
+                        login && lines(sites).isEmpty() -> "Add the website this login is for."
+                        login && values.isNotEmpty() && password.isEmpty() -> "Enter the password."
+                        !editing && values.isEmpty() -> "Enter the value."
+                        editing && values.isEmpty() && level != existing?.level?.toInt() ->
+                            "Changing the level re-encrypts it, so enter its " + (if (login) "password" else "value") + " again."
+                        else -> onSave(
+                            NewSecret(
+                                name.trim(), level.toUByte(), values, if (login) emptyList() else lines(allow), maxGrant, login,
+                                if (login) lines(sites) else emptyList(),
+                            ),
+                        )
+                    }
                 },
-                enabled = name.isNotBlank() && if (login) password.isNotEmpty() && sites.isNotBlank() else value.isNotEmpty(),
-            ) { Text(if (login) "Add login" else "Add secret") }
+            ) { Text(if (editing) "Save" else if (login) "Add login" else "Add secret") }
         }
     }
 }
@@ -727,13 +942,19 @@ private fun AddSecret(scan: ((String) -> Unit) -> Unit, onCancel: () -> Unit, on
 // --- Devices ----------------------------------------------------------------------
 
 /**
- * Adding a device: the new one shows a code while it has no vault (a Mac in
- * its setup window), and this phone scans it or takes it as text.
+ * Adding a device, either way round: the new device shows a code (a Mac in
+ * its setup window) and this phone scans it; or this phone shows an
+ * invitation and the new device scans or pastes it.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddDevice(controller: MayiController, scan: ((String) -> Unit) -> Unit, onClose: () -> Unit) {
+private fun AddDevice(
+    app: MayiApp, controller: MayiController, state: MayiController.State, scan: ((String) -> Unit) -> Unit,
+    onClose: () -> Unit,
+) {
+    var showing by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
+    var invitation by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var added by remember { mutableStateOf<String?>(null) }
@@ -747,38 +968,78 @@ private fun AddDevice(controller: MayiController, scan: ((String) -> Unit) -> Un
             result.onSuccess { added = it }.onFailure { error = it.message }
         }.start()
     }
-    ModalBottomSheet(onDismissRequest = { if (!busy) onClose() }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    val invite = {
+        showing = true
+        error = null
+        Thread {
+            if (!app.authenticate("Add a device that will hold all your secrets")) {
+                error = "Adding a device needs your fingerprint."
+            } else {
+                controller.startEnrolment(600u).onSuccess { invitation = it }.onFailure { error = it.message }
+            }
+        }.start()
+    }
+    val close = {
+        controller.cancelInvitation()
+        onClose()
+    }
+    ModalBottomSheet(onDismissRequest = { if (!busy) close() }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(
             Modifier.padding(horizontal = 24.dp).padding(bottom = 28.dp).imePadding().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text("Add a device", style = MaterialTheme.typography.titleLarge)
-            val name = added
+            val name = added ?: state.lastDeviceAdded.takeIf { invitation != null }
             if (name != null) {
                 Text("$name was added. It now holds a copy of every secret and can answer requests.", style = MaterialTheme.typography.bodyLarge)
                 Row {
                     Spacer(Modifier.weight(1f))
-                    Button(onClick = onClose) { Text("Done") }
+                    Button(onClick = close) { Text("Done") }
                 }
                 return@Column
             }
-            Text(
-                "Start setting up Mayi on the new device. A Mac shows a code under Join Your Vault: scan it here.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Button(onClick = { scan { add(it) } }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Scan code")
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                SegmentedButton(selected = !showing, onClick = { showing = false }, shape = SegmentedButtonDefaults.itemShape(0, 2)) {
+                    Text("Scan its code")
+                }
+                SegmentedButton(
+                    selected = showing, onClick = { if (invitation == null) invite() else showing = true },
+                    shape = SegmentedButtonDefaults.itemShape(1, 2),
+                ) {
+                    Text("Show an invitation")
+                }
             }
-            OutlinedTextField(
-                code, { code = it }, Modifier.fillMaxWidth(), label = { Text("Or enter the code as text") },
-                placeholder = { Text("mayij1.…") }, textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                enabled = !busy, minLines = 2,
-            )
-            if (busy) {
-                LinearProgressIndicator(Modifier.fillMaxWidth())
-                Text("Adding. If you have level 4 secrets, confirm with your fingerprint.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+            if (!showing) {
+                Text(
+                    "Start setting up Mayi on the new device: a Mac shows a code under Join Your Vault, a phone under Show a code. Scan it here.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Button(onClick = { scan { add(it) } }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Scan code")
+                }
+                OutlinedTextField(
+                    code, { code = it }, Modifier.fillMaxWidth(), label = { Text("Or enter the code as text") },
+                    placeholder = { Text("mayij1.…") }, textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                    enabled = !busy, minLines = 2,
+                )
+                if (busy) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(
+                        "Adding. If you have level 4 secrets, confirm with your fingerprint.",
+                        style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                Text(
+                    "On a new phone, choose Scan code from another device. On a new Mac, paste it under Use an Invitation. It works once, within 10 minutes.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                invitation?.let {
+                    CodeToPass(it, "Mayi invitation")
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
             }
             error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = scheme.error) }
             Text(
@@ -787,23 +1048,128 @@ private fun AddDevice(controller: MayiController, scan: ((String) -> Unit) -> Un
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = onClose, enabled = !busy) { Text("Cancel") }
-                Button(onClick = { add(code) }, enabled = !busy && code.isNotBlank()) { Text("Add") }
+                TextButton(onClick = close, enabled = !busy) { Text("Cancel") }
+                if (!showing) Button(onClick = { add(code) }, enabled = !busy && code.isNotBlank()) { Text("Add") }
             }
         }
     }
 }
 
+/** An invitation for a machine to pair: a command to run there. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PairMachine(app: MayiApp, controller: MayiController, state: MayiController.State, onClose: () -> Unit) {
+    var token by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    DisposableEffect(Unit) {
+        Thread {
+            if (!app.authenticate("Allow another machine to request secrets")) {
+                error = "Pairing needs your fingerprint."
+            } else {
+                controller.startPairing(600u).onSuccess { token = it }.onFailure { error = it.message }
+            }
+        }.start()
+        onDispose { controller.cancelInvitation() }
+    }
+    ModalBottomSheet(onDismissRequest = onClose, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(
+            Modifier.padding(horizontal = 24.dp).padding(bottom = 28.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("Pair a machine", style = MaterialTheme.typography.titleLarge)
+            val paired = state.lastPaired.takeIf { token != null }
+            if (paired != null) {
+                Text("Paired with $paired. It can now ask this vault for secrets; it stores none.", style = MaterialTheme.typography.bodyLarge)
+            } else {
+                Text(
+                    "Run this on the machine within 10 minutes. It must reach this phone on the same network or over Tailscale.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                token?.let {
+                    CodeToPass("mayi pair $it", "Mayi pairing", qr = false)
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+            }
+            error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
+            Row {
+                Spacer(Modifier.weight(1f))
+                Button(onClick = onClose) { Text(if (paired != null) "Done" else "Close") }
+            }
+        }
+    }
+}
+
+/** The recovery key, shown once. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RecoveryKey(key: String, onClose: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = {}, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(
+            Modifier.padding(horizontal = 24.dp).padding(bottom = 28.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("Recovery key", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Write it down or print it, and keep it somewhere offline. It is not stored, and it is not shown again.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            CodeToPass(key, "Mayi recovery key", qr = false)
+            Text(
+                "With this key and a copy of the vault file, anyone can read every secret. It restores a Mac whose keys were lost. Making a new key replaces this one.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row {
+                Spacer(Modifier.weight(1f))
+                Button(onClick = onClose) { Text("I have saved it") }
+            }
+        }
+    }
+}
+
+private fun rotationAdvice(names: List<String>, what: String) =
+    if (names.isEmpty()) "Nothing to rotate: $what no secret." else "Rotate these secrets, which $what: ${names.joinToString()}."
+
 @Composable
 private fun Devices(
-    controller: MayiController, state: MayiController.State, adding: Boolean, scan: ((String) -> Unit) -> Unit,
-    setAdding: (Boolean) -> Unit,
+    app: MayiApp, controller: MayiController, state: MayiController.State, adding: Boolean,
+    scan: ((String) -> Unit) -> Unit, setAdding: (Boolean) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    if (adding) AddDevice(controller, scan) { setAdding(false) }
+    val activity = LocalContext.current as? Activity
+    var pairing by remember { mutableStateOf(false) }
+    var removing by remember { mutableStateOf<DeviceInfo?>(null) }
+    var advice by remember { mutableStateOf<String?>(null) }
+    var recoveryKey by remember { mutableStateOf<String?>(null) }
+    var confirmJoin by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    if (adding) AddDevice(app, controller, state, scan) { setAdding(false) }
+    if (pairing) PairMachine(app, controller, state) { pairing = false }
+    recoveryKey?.let { RecoveryKey(it) { recoveryKey = null } }
+
     LazyColumn {
-        state.syncStatus?.let { status ->
-            item { Text(status, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
+        if (controller.vaultIsEmpty) {
+            item {
+                Card(Modifier.fillMaxWidth().padding(16.dp)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("This phone’s vault is empty", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "If your secrets are on another device, join that vault instead. Mayi restarts into setup.",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        OutlinedButton(onClick = { confirmJoin = true }) { Text("Join another vault") }
+                    }
+                }
+            }
+        }
+        (error ?: state.syncStatus)?.let { status ->
+            item {
+                Text(
+                    status, style = MaterialTheme.typography.bodySmall,
+                    color = if (error != null) scheme.error else scheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
         }
         items(state.devices, key = { it.id }) { device ->
             ListItem(
@@ -828,19 +1194,48 @@ private fun Devices(
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                 },
-                trailingContent = { if (device.removed) Text("Removed", color = scheme.error) },
+                trailingContent = {
+                    when {
+                        device.removed -> Text("Removed", color = scheme.error)
+                        !device.thisDevice -> TextButton(onClick = { removing = device }) { Text("Remove", color = scheme.error) }
+                    }
+                },
             )
         }
         item {
-            Text(
-                "Machines", style = MaterialTheme.typography.titleSmall, color = scheme.primary,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 8.dp),
+            ListItem(
+                leadingContent = { Icon(Icons.Outlined.Key, contentDescription = null) },
+                headlineContent = { Text("Create recovery key") },
+                supportingContent = { Text("An offline key that restores the vault if your devices’ keys are lost") },
+                modifier = Modifier.clickable {
+                    Thread {
+                        if (!app.authenticate("Create a key that can open your vault without this phone")) {
+                            error = "Creating a recovery key needs your fingerprint."
+                        } else {
+                            controller.createRecoveryKey()
+                                .onSuccess {
+                                    recoveryKey = it
+                                    error = null
+                                }
+                                .onFailure { error = it.message }
+                        }
+                    }.start()
+                },
             )
+        }
+        item {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 24.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Machines", style = MaterialTheme.typography.titleSmall, color = scheme.primary, modifier = Modifier.weight(1f))
+                TextButton(onClick = { pairing = true }) { Text("Pair a machine") }
+            }
         }
         if (state.machines.isEmpty()) {
             item {
                 Text(
-                    "None yet. Pair machines from Mayi on your Mac.",
+                    "None yet. A paired machine, such as a server or a VM running agents, asks this vault for secrets and stores none.",
                     style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
@@ -865,6 +1260,46 @@ private fun Devices(
         }
         // Room for the Add button to float without covering the last row.
         item { Spacer(Modifier.height(88.dp)) }
+    }
+
+    removing?.let { device ->
+        AlertDialog(
+            onDismissRequest = { removing = null },
+            title = { Text("Remove ${device.name}?") },
+            text = { Text("It stops syncing and answering for this vault. It keeps what it could already read, so Mayi lists the secrets to rotate.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    removing = null
+                    controller.removeDevice(device.id)
+                        .onSuccess { advice = rotationAdvice(it, "${device.name} could read") }
+                        .onFailure { error = it.message }
+                    Thread { controller.sync() }.start()
+                }) { Text("Remove", color = scheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } },
+        )
+    }
+    advice?.let {
+        AlertDialog(
+            onDismissRequest = { advice = null },
+            title = { Text("Removed") },
+            text = { Text(it) },
+            confirmButton = { TextButton(onClick = { advice = null }) { Text("OK") } },
+        )
+    }
+    if (confirmJoin) {
+        AlertDialog(
+            onDismissRequest = { confirmJoin = false },
+            title = { Text("Join another vault?") },
+            text = { Text("This phone’s empty vault is set aside, and Mayi restarts into setup.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmJoin = false
+                    error = activity?.let { app.setAsideEmptyVault(it) }
+                }) { Text("Restart and join") }
+            },
+            dismissButton = { TextButton(onClick = { confirmJoin = false }) { Text("Cancel") } },
+        )
     }
 }
 

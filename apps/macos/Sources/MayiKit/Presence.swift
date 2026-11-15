@@ -12,7 +12,7 @@ public struct BiometricPresence: PresenceCheck {
 
     public func confirm(reason: String) async -> Bool {
         let context = LAContext()
-        return (try? await context.evaluatePolicy(
-            .deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)) ?? false
+        // Touch ID, an Apple Watch, or the login password when neither can be used.
+        return (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)) ?? false
     }
 }

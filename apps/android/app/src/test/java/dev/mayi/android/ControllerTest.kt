@@ -181,6 +181,38 @@ class ControllerTest {
     }
 
     @Test
+    fun thePhoneManagesTheVaultAsTheMacDoes() {
+        val keys = TestKeys()
+        val (phone, _) = phone(keys)
+        assertTrue("a new vault is empty", phone.vaultIsEmpty)
+
+        // Editing rules keeps the value.
+        assertNull(phone.saveSecret("TOKEN", 3u, mapOf("value" to "abc"), emptyList(), 900u))
+        assertNull(phone.updateRules("TOKEN", listOf("gh *"), 60u, emptyList()))
+        val edited = phone.state.secrets.single()
+        assertEquals(listOf("gh *"), edited.allow)
+        assertEquals(60uL, edited.maxGrantSecs)
+        assertTrue(!phone.vaultIsEmpty)
+
+        // Pairing a machine from the phone.
+        val token = phone.startPairing(60u).getOrThrow()
+        assertEquals("Paired with phone as vm.\n", mayi("pair", token, "--name", "vm").out)
+        eventually("the pairing to show") { phone.state.lastPaired == "vm" }
+
+        // Inviting a device from the phone: it scans or pastes the invitation.
+        val invitation = phone.startEnrolment(60u).getOrThrow()
+        val otherKeys = TestKeys()
+        joinVault(File(dir, "other.db").path, "other phone", otherKeys, invitation)
+        eventually("the device to show") { phone.state.lastDeviceAdded == "other phone" }
+
+        // A recovery key, and removing a device with the secrets to rotate.
+        assertTrue(phone.createRecoveryKey().getOrThrow().startsWith("mayi-recovery1."))
+        val other = phone.state.devices.first { it.name == "other phone" }
+        assertEquals(listOf("TOKEN"), phone.removeDevice(other.id).getOrThrow())
+        assertTrue(phone.state.devices.first { it.name == "other phone" }.removed)
+    }
+
+    @Test
     fun aPhoneJoinsAnotherDevicesVault() {
         val macKeys = TestKeys()
         val (mac, _) = phone(macKeys, "mac")

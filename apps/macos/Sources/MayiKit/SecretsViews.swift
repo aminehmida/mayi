@@ -409,7 +409,7 @@ struct ActivityRow: View {
         case "allowlist": return "as an expected command"
         case "grant": return "under an earlier approval"
         case "approval": return "with your approval"
-        case "biometric": return "with your fingerprint"
+        case "biometric": return "after you confirmed it"
         default: return via
         }
     }

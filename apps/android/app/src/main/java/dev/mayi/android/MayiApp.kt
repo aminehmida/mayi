@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -13,11 +14,13 @@ import android.os.IBinder
 import android.provider.Settings
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import dev.mayi.ffi.JoinInvitation
 import dev.mayi.ffi.WakeInfo
 import dev.mayi.ffi.joinVault
 import java.io.File
@@ -76,7 +79,22 @@ class MayiApp : Application() {
                 manager.cancel(NOTE_ATTENTION)
             }
         }
-        if (hasVault) startService()
+        // The service is not started here: the process may be starting in the
+        // background, where Android refuses a foreground service. It is started
+        // by the screen, the boot receiver and the wake-up push instead.
+    }
+
+    /**
+     * Keeps the vault serving, if there is one. Only allowed while the app is
+     * on screen, just after boot, or on a wake-up push; elsewhere it does nothing.
+     */
+    fun ensureServing() {
+        if (!hasVault) return
+        try {
+            startService()
+        } catch (e: IllegalStateException) {
+            // ForegroundServiceStartNotAllowedException: not allowed from here.
+        }
     }
 
     private fun startService() {
@@ -113,6 +131,47 @@ class MayiApp : Application() {
         open().also { if (it == null) startService() }
     } catch (e: Exception) {
         MayiController.describe(e)
+    }
+
+    /** A code for a device that holds the vault to scan or paste, valid ten minutes. */
+    fun openJoinCode(): JoinInvitation = JoinInvitation.open(emptyList(), 600u)
+
+    /**
+     * Waits until a device with the vault adds this phone through [code],
+     * then opens the vault. Blocks. Returns an error message, or null.
+     */
+    fun joinByCode(code: JoinInvitation): String? = try {
+        code.wait(vaultFile.path, defaultDeviceName, keys)
+        open().also { if (it == null) startService() }
+    } catch (e: Exception) {
+        MayiController.describe(e)
+    }
+
+    /** Whether requests that arrive in the background can reach the user. */
+    val notificationsBlocked: Boolean
+        get() {
+            val manager = NotificationManagerCompat.from(this)
+            val channel = manager.getNotificationChannel(CHANNEL_REQUESTS)
+            return !manager.areNotificationsEnabled() || channel?.importance == NotificationManager.IMPORTANCE_NONE
+        }
+
+    /**
+     * Moves this phone's empty vault aside and restarts the app into setup,
+     * to join another vault. The file is kept, renamed. Returns an error
+     * message if the vault is not empty.
+     */
+    fun setAsideEmptyVault(activity: android.app.Activity): String? {
+        if (!controller.vaultIsEmpty) return "This vault holds secrets or other devices, so Mayi will not replace it."
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT).format(java.util.Date())
+        filesDir.listFiles { f -> f.name == "vault.db" || f.name.startsWith("vault.db-") }?.forEach {
+            it.renameTo(File(filesDir, "set-aside-$stamp-${it.name}"))
+        }
+        stopService(Intent(this, VaultService::class.java))
+        // The core keeps its port open until the process ends, so start afresh.
+        activity.startActivity(
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        Runtime.getRuntime().exit(0)
+        return null
     }
 
     /**
@@ -214,10 +273,18 @@ class VaultService : Service() {
     }
 }
 
+/** After a restart, serves again without waiting for the app to be opened. */
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        (context.applicationContext as MayiApp).ensureServing()
+    }
+}
+
 /** The empty wake-up push: all it has to do is bring the service up. */
 class WakeService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
-        ContextCompat.startForegroundService(this, Intent(this, VaultService::class.java))
+        (application as MayiApp).ensureServing()
     }
 
     override fun onNewToken(token: String) {

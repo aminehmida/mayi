@@ -33,7 +33,7 @@ import Testing
             keys: TestKeys(),
             paths: MayiPaths(home: other.appendingPathComponent("home"), socket: other.appendingPathComponent("s.sock").path, port: 0),
             deviceName: "test")
-        #expect(await absent.startPairing() == "Pairing needs your fingerprint.")
+        #expect(await absent.startPairing() == "Pairing needs you to confirm, with Touch ID or your password.")
         #expect(absent.pairingToken == nil)
     }
 

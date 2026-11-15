@@ -193,8 +193,29 @@ by hand:
 - [ ] The Mac's first launch with no vault shows the setup window, and
       "Create New Vault…" still works.
 - [ ] Scanning with the phone's camera (the emulator could only type the code).
-- [ ] A phone cannot show a code or an invitation yet, so two phones cannot
-      join each other without a Mac.
+
+## Fixes from the experience review (v0.1.0-alpha.3)
+
+Tested: approvals "for this session" now hold across separate commands from
+one Claude Code session (two commands from this session reported the same
+`claude (pid …)`); a paired machine keeps reaching a device through an
+address the device does not announce; on the emulator, the phone showed a
+join code and was added, paired a machine, edited a secret, made a recovery
+key, removed a device, warned with notifications off, served again after a
+reboot without being opened, and set aside an empty vault into setup; the
+Mac picks the password-accepting level 4 key for a new vault (tested on the
+real Secure Enclave). Still to do by hand:
+
+- [ ] On the MacBook, with the lid closed on a display: Add a Device,
+      Pair a Machine and a level 4 secret each accept your password.
+- [ ] Mayi appears in the Dock while its window is open and leaves it when
+      the window closes; opening Mayi from Spotlight shows the window; it is
+      in System Settings, General, Login Items, and "Open at Login" in its
+      menu turns that off.
+- [ ] In a real Claude Code session, "Allow for This Session" covers the
+      next commands, and the prompt names the session `claude (pid …)`.
+- [ ] On the phone: restart it and, without opening Mayi, use a paired
+      machine; the QR codes it shows scan from another phone.
 
 ## Decisions waiting for you
 
@@ -202,13 +223,9 @@ by hand:
       `aminehmida/mayi`.
 - [ ] The name "Mayi" is unchecked for trademark, domain and package conflicts.
 - [ ] No licence has been chosen.
-- [ ] Level 4 uses `biometryCurrentSet`: adding or removing a fingerprint
-      makes this Mac's level 4 secrets unreadable until another device or the
-      recovery key (milestone 5) restores them. The looser alternative keeps
-      them readable across fingerprint changes.
-- [ ] Pairing in the app requires Touch ID, so a Mac whose Touch ID keyboard
-      is disconnected cannot pair a machine. Allowing the login password
-      instead is possible but weaker.
+- [x] Level 4 on the Mac accepts Touch ID, an Apple Watch or the login
+      password (your choice, alpha.3), and so does pairing; fingerprint
+      changes no longer lock level 4 secrets on a newly set-up Mac.
 - [ ] Pairing tokens are long text to paste, not a short code to type. A
       short code would need an extra cryptographic library (a PAKE).
 - [ ] The vault key is never rotated, so removing a device or replacing the
@@ -222,8 +239,7 @@ by hand:
 - [ ] On Android the biometric key stays usable for 10 seconds after a
       fingerprint, because binding each single use to a fingerprint needs
       Android 15. The Mac's key is per use.
-- [ ] Machines can be paired and devices added only from the Mac app so far;
-      the phone can join, approve, edit secrets and revoke.
+- [x] The phone can now pair machines and add, remove and invite devices.
 - [ ] Java (Temurin 21) was installed through mise for the Android build.
 - [ ] I started Docker Desktop to test the Linux binary and quit it afterwards.
       I tried again for the website logins; its engine never answered and its

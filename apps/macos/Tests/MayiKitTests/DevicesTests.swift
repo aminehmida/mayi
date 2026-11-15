@@ -20,7 +20,7 @@ import Testing
 
     @Test func addingADeviceNeedsTheOwner() async throws {
         let absent = try model(try scratch(), "mac", keys: TestKeys(), presence: false)
-        #expect(await absent.startEnrolment() == "Adding a device needs your fingerprint.")
+        #expect(await absent.startEnrolment() == "Adding a device needs you to confirm, with Touch ID or your password.")
         #expect(absent.enrolmentToken == nil)
     }
 

@@ -17,7 +17,7 @@ it with secrets that matter.
 
 ## Install
 
-The current release is an alpha: `v0.1.0-alpha.2`. This repository is
+The current release is an alpha: `v0.1.0-alpha.3`. This repository is
 private, so every installer needs a GitHub token that can read it.
 
 ### Mac (Homebrew)
@@ -51,7 +51,7 @@ default branch. Two things need to reach it as aminehmida:
 On a server or a Mac without the app, `brew install aminehmida/mayi/mayi-cli`
 installs only the `mayi` command (macOS on Apple silicon, Linux on x86_64 or
 ARM). Without Homebrew:
-`gh release download v0.1.0-alpha.2 -R aminehmida/mayi -p 'mayi-*-x86_64-unknown-linux-musl.tar.gz'`.
+`gh release download v0.1.0-alpha.3 -R aminehmida/mayi -p 'mayi-*-x86_64-unknown-linux-musl.tar.gz'`.
 
 ### Android (Obtainium)
 
@@ -86,7 +86,7 @@ safe: a release signed with another key cannot update installed copies.
 | 1 log | Released silently and recorded |
 | 2 notify | Released at once; you are notified and can stop the command |
 | 3 approve | Held until you approve |
-| 4 biometric | Encrypted to a biometric-gated hardware key |
+| 4 biometric | Encrypted to a hardware key that needs you for every use: a fingerprint on the phone; Touch ID, your Apple Watch or your password on a Mac |
 
 Levels 1 to 3 are rules the vault device follows; they stop a misbehaving
 agent, not malware on the vault device. Only level 4 is enforced by
@@ -112,8 +112,15 @@ apps/macos/build/Mayi.app/Contents/Resources/mayi run -s GH_TOKEN -r "list open 
 ```
 
 The app keeps its vault in `~/Library/Application Support/Mayi` and its keys
-in the Secure Enclave. Level 4 secrets need Touch ID for every unlock, and
-are lost on this Mac if the enrolled fingerprints change.
+in the Secure Enclave. Level 4 secrets need Touch ID, your Apple Watch or
+your login password for every unlock, so a closed lid does not block them.
+A Mac set up before v0.1.0-alpha.3 keeps its fingerprint-only key, which
+changed fingerprints make unusable, until its vault is set up again.
+
+Mayi lives in the menu bar, and in the Dock while one of its windows is
+open. Opening it from Finder or Spotlight shows its window, which helps when
+the notch hides the menu-bar icon. It starts at login; "Open at Login" in its
+menu turns that off.
 
 ## Website logins
 
@@ -174,8 +181,17 @@ that, a change on either reaches the other the next time they can connect
   device".
 - **Two Macs:** paste one Mac's code into the other, either way round.
 
-A Mac that already started an empty vault of its own shows "Join Another
-Vault…" in Devices: Mayi sets the empty vault aside and restarts into setup.
+- **Two phones:** the new phone chooses "Show a code for your other
+  device"; the other scans it from Devices, "Add device".
+
+A Mac or phone that already started an empty vault of its own shows "Join
+Another Vault…" in Devices: Mayi sets the empty vault aside and restarts
+into setup.
+
+The phone app does what the Mac app does: add and edit secrets and logins,
+pair machines, add and remove devices, and make a recovery key. It starts
+serving again after the phone restarts, and warns when notifications are
+off, since requests in the background could not reach you.
 
 The Android app is in `apps/android`:
 

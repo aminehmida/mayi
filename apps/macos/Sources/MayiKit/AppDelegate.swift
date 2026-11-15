@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import ServiceManagement
 import SwiftUI
 
 /// A floating panel that does not take keyboard focus from whatever the user
@@ -69,7 +70,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             guard SecureEnclaveKeys.isAvailable else {
                 throw MayiError.Failed(detail: "This Mac has no Secure Enclave, so it cannot be a vault device.")
             }
-            keys = try SecureEnclaveKeys.loadOrCreate(directory: paths.keys)
+            let fresh = !FileManager.default.fileExists(atPath: paths.vault.path)
+            keys = try SecureEnclaveKeys.loadOrCreate(directory: paths.keys, freshVault: fresh)
         } catch {
             fail(error)
             return
@@ -94,6 +96,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         model.onRestart = { [weak self] in self?.relaunch() }
         installStatusItem(socket: paths.socket)
+        openAtLoginFirstTime(paths: paths)
         model.$pending
             .receive(on: DispatchQueue.main)
             .sink { [weak self] pending in self?.showApproval(pending) }
@@ -139,8 +142,58 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSetup() {
+        guard let window = welcomeWindow else { return }
+        show(window)
+    }
+
+    // MARK: Dock and login
+
+    /// Opening Mayi again (from Finder, Spotlight or the Dock) shows its
+    /// window: the menu-bar icon may be hidden behind the notch.
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if welcomeWindow != nil { showSetup() } else { openMainWindow() }
+        return true
+    }
+
+    /// Shows a window, with Mayi in the Dock and the app switcher until the
+    /// last window closes.
+    private func show(_ window: NSWindow) {
+        NSApp.setActivationPolicy(.regular)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(windowWillClose(_:)), name: NSWindow.willCloseNotification, object: window)
         NSApp.activate(ignoringOtherApps: true)
-        welcomeWindow?.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        let closing = notification.object as? NSWindow
+        let others = [mainWindow, welcomeWindow].compactMap { $0 }.filter { $0 !== closing && $0.isVisible }
+        if others.isEmpty {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
+    private static let loginItemDecided = "loginItemDecided"
+
+    /// Mayi starts at login unless the user turned that off: an agent's
+    /// request after a restart should not fail because nobody opened it.
+    /// Only for the real vault, not a test run with its own home.
+    private func openAtLoginFirstTime(paths: MayiPaths) {
+        guard ProcessInfo.processInfo.environment["MAYI_APP_HOME"] == nil,
+            !UserDefaults.standard.bool(forKey: Self.loginItemDecided)
+        else { return }
+        try? SMAppService.mainApp.register()
+        UserDefaults.standard.set(true, forKey: Self.loginItemDecided)
+    }
+
+    @objc private func toggleOpenAtLogin(_ item: NSMenuItem) {
+        UserDefaults.standard.set(true, forKey: Self.loginItemDecided)
+        if SMAppService.mainApp.status == .enabled {
+            try? SMAppService.mainApp.unregister()
+        } else {
+            try? SMAppService.mainApp.register()
+        }
+        item.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }
 
     /// While the Mac has no vault, the menu bar only leads back to setup.
@@ -210,6 +263,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let shown = socket.hasPrefix(home) ? "~" + socket.dropFirst(home.count) : socket
         menu.addItem(withTitle: "Serving \(shown)", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
+        let login = menu.addItem(withTitle: "Open at Login", action: #selector(toggleOpenAtLogin(_:)), keyEquivalent: "")
+        login.target = self
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let build = Bundle.main.object(forInfoDictionaryKey: "MayiVersion") as? String
+        menu.addItem(withTitle: "Mayi \(build ?? version ?? "")", action: nil, keyEquivalent: "")
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Mayi", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.menu = menu
         statusItem = item
@@ -220,8 +280,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             mainWindow = MainWindow.make(model: model)
         }
         model.refresh()
-        NSApp.activate(ignoringOtherApps: true)
-        mainWindow?.makeKeyAndOrderFront(nil)
+        if let mainWindow { show(mainWindow) }
     }
 
     /// Shows the oldest pending approval; the rest wait their turn.

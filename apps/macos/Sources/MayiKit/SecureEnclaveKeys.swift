@@ -7,18 +7,28 @@ import Security
 ///
 /// The private keys never leave the enclave. What is stored on disk are
 /// opaque blobs that only this Mac's enclave can use. The device key works
-/// whenever the Mac has been unlocked once; the biometric key requires a
-/// fingerprint for every use and is invalidated if the enrolled fingerprints
-/// change.
+/// whenever the Mac has been unlocked once. The level 4 key needs the owner
+/// for every use: Touch ID, an Apple Watch, or the login password when
+/// Touch ID cannot be used (a closed lid, no Touch ID keyboard).
+///
+/// Macs set up with an earlier version have a fingerprint-only level 4 key
+/// (`biometric.sekey`), which their vault's level 4 secrets are encrypted
+/// to. It is kept until the Mac sets its vault aside and joins or starts a
+/// new one.
 public final class SecureEnclaveKeys: KeyStore, @unchecked Sendable {
     private let device: SecureEnclave.P256.KeyAgreement.PrivateKey
     private let biometricBlob: Data
     private let biometricPublicKey: Data
+    /// Whether the level 4 key also accepts the password or a watch.
+    public let acceptsPassword: Bool
 
     public static var isAvailable: Bool { SecureEnclave.isAvailable }
 
     /// Loads the keys stored in `directory`, generating them on first run.
-    public static func loadOrCreate(directory: URL) throws -> SecureEnclaveKeys {
+    /// `freshVault` says no vault depends on the keys yet, so an older
+    /// fingerprint-only level 4 key can give way to one that also accepts
+    /// the password.
+    public static func loadOrCreate(directory: URL, freshVault: Bool = false) throws -> SecureEnclaveKeys {
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
@@ -27,16 +37,23 @@ public final class SecureEnclaveKeys: KeyStore, @unchecked Sendable {
                 accessControl: accessControl(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, [.privateKeyUsage])
             ).dataRepresentation
         }
-        let biometricBlob = try blob(at: directory.appendingPathComponent("biometric.sekey")) {
+        let older = directory.appendingPathComponent("biometric.sekey")
+        let current = directory.appendingPathComponent("presence.sekey")
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: current.path), fm.fileExists(atPath: older.path), !freshVault {
+            return try SecureEnclaveKeys(
+                deviceBlob: deviceBlob, biometricBlob: try Data(contentsOf: older), acceptsPassword: false)
+        }
+        let presenceBlob = try blob(at: current) {
             try SecureEnclave.P256.KeyAgreement.PrivateKey(
-                accessControl: accessControl(
-                    kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet])
+                accessControl: accessControl(kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .userPresence])
             ).dataRepresentation
         }
-        return try SecureEnclaveKeys(deviceBlob: deviceBlob, biometricBlob: biometricBlob)
+        return try SecureEnclaveKeys(deviceBlob: deviceBlob, biometricBlob: presenceBlob, acceptsPassword: true)
     }
 
-    init(deviceBlob: Data, biometricBlob: Data) throws {
+    init(deviceBlob: Data, biometricBlob: Data, acceptsPassword: Bool) throws {
+        self.acceptsPassword = acceptsPassword
         device = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: deviceBlob)
         // Loading the key and reading its public half asks for nothing; only
         // using the private half does.

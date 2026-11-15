@@ -790,7 +790,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "mayi-cli"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "base64",
  "clap",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "mayi-core"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "chacha20poly1305",
  "hex",
@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "mayi-devd"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "clap",
  "mayi-core",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "mayi-ffi"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "mayi-core",
  "mayi-proto",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "mayi-proto"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "base64",
  "hex",

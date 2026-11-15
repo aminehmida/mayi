@@ -24,7 +24,7 @@ website with `mayi fill` (below), never given to a command. Levels:
 | 1 | Released at once and logged. |
 | 2 | Released at once; the user is notified and can stop your command. |
 | 3 | The user must approve. They see your exact command and your reason. |
-| 4 | The user must approve with a fingerprint. |
+| 4 | The user must confirm on their device: a fingerprint, or on a Mac Touch ID or their password. |
 
 ## Run a command with secrets
 

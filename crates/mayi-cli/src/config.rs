@@ -32,11 +32,34 @@ pub struct Device {
     /// Groups the devices of one vault: the key of the device first paired with.
     #[serde(default)]
     pub vault: Option<String>,
+    /// The address and port that last reached this device, tried first. It
+    /// may be one the device does not know of: a Tailscale name, a tunnel, a
+    /// forwarded port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reached: Option<String>,
 }
 
 impl Device {
     pub fn public(&self) -> io::Result<PublicKey> {
         key_from_hex(&self.public_key)
+    }
+
+    /// Where to try, in order: the address that worked last, then every
+    /// address the device announced, on its port.
+    pub fn candidates(&self) -> Vec<(String, u16)> {
+        let mut out: Vec<(String, u16)> = Vec::new();
+        if let Some((host, port)) = self.reached.as_deref().and_then(|r| r.rsplit_once(':')) {
+            if let Ok(port) = port.parse() {
+                out.push((host.trim_start_matches('[').trim_end_matches(']').to_string(), port));
+            }
+        }
+        for address in &self.addresses {
+            let candidate = (address.clone(), self.port);
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+        out
     }
 }
 
@@ -107,6 +130,9 @@ impl Config {
         let vault = via.vault.clone().unwrap_or_else(|| via.public_key.clone());
         self.devices.retain(|d| d.vault.as_deref().unwrap_or(&d.public_key) != vault && !known.contains(&d.public_key));
         self.devices.extend(peers.into_iter().map(|p| Device {
+            // What worked before is kept: the announced addresses are only
+            // the ones the device sees on its own network interfaces.
+            reached: before.iter().find(|d| d.public_key == p.public_key).and_then(|d| d.reached.clone()),
             name: p.name,
             public_key: p.public_key,
             port: p.port,
@@ -136,6 +162,7 @@ mod tests {
             addresses: vec![],
             wake: None,
             vault: vault.map(String::from),
+            reached: None,
         }
     }
 
@@ -164,5 +191,23 @@ mod tests {
         // A list that leaves out its sender is ignored.
         assert!(!config.update_peers(&via, vec![peer("evil", "cc")]));
         assert_eq!(names(&config), ["other-vault", "phone"]);
+    }
+
+    #[test]
+    fn the_address_that_worked_survives_a_peer_list() {
+        let mut config = Config::default();
+        let mut mac = device("mac", "aa", None);
+        mac.addresses = vec!["192.168.1.10".into()];
+        mac.reached = Some("macbook.tailnet.ts.net:7462".into());
+        config.remember(mac);
+        let via = config.devices[0].clone();
+        config.update_peers(&via, vec![peer("mac", "aa")]);
+        let mac = &config.devices[0];
+        assert_eq!(mac.addresses, ["a"], "announced addresses are refreshed");
+        assert_eq!(mac.reached.as_deref(), Some("macbook.tailnet.ts.net:7462"));
+        assert_eq!(mac.candidates(), [("macbook.tailnet.ts.net".to_string(), 7462), ("a".to_string(), 2)]);
+
+        let tunnel = Device { reached: Some("[::1]:17462".into()), ..device("x", "bb", None) };
+        assert_eq!(tunnel.candidates(), [("::1".to_string(), 17462)]);
     }
 }

@@ -195,7 +195,7 @@ public final class AppModel: ObservableObject {
     public func startEnrolment() async -> String? {
         guard let device, let paths else { return "The vault is not open." }
         guard await presence.confirm(reason: "add a device that will hold all your secrets") else {
-            return "Adding a device needs your fingerprint."
+            return "Adding a device needs you to confirm, with Touch ID or your password."
         }
         guard listenForMachines() else { return remoteError }
         do {
@@ -231,7 +231,7 @@ public final class AppModel: ObservableObject {
     public func createRecoveryKey() async -> String? {
         guard let device else { return "The vault is not open." }
         guard await presence.confirm(reason: "create a key that can open your vault without this Mac") else {
-            return "Creating a recovery key needs your fingerprint."
+            return "Creating a recovery key needs you to confirm, with Touch ID or your password."
         }
         do {
             // Off the main thread: sharing level 4 keys may ask for Touch ID.
@@ -305,7 +305,7 @@ public final class AppModel: ObservableObject {
     public func startPairing() async -> String? {
         guard let device, let paths else { return "The vault is not open." }
         guard await presence.confirm(reason: "allow another machine to request secrets") else {
-            return "Pairing needs your fingerprint."
+            return "Pairing needs you to confirm, with Touch ID or your password."
         }
         guard listenForMachines() else { return remoteError }
         do {

@@ -71,7 +71,7 @@ public struct EnrolmentSheet: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 2)
                 }
-                Text("The new device receives the whole vault. If you have level 4 secrets, this Mac asks for your fingerprint when the device connects, to share their keys with it.")
+                Text("The new device receives the whole vault. If you have level 4 secrets, this Mac asks you to confirm when the device connects, to share their keys with it.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -100,11 +100,11 @@ enum LevelInfo {
         case (1, false): return "Released silently and recorded in Activity."
         case (2, false): return "Released at once. You are notified and can stop the command."
         case (3, false): return "Held until you approve the command."
-        case (4, false): return "Locked to this Mac\u{2019}s Touch ID. Every unlock needs your fingerprint."
+        case (4, false): return "Locked to this Mac\u{2019}s Secure Enclave. Every unlock needs Touch ID, your Apple Watch or your password."
         case (1, true): return "Typed in without asking, and recorded in Activity."
         case (2, true): return "Typed in at once. You are notified and can stop the session."
         case (3, true): return "Typed in once you approve the sign-in."
-        case (4, true): return "Locked to this Mac\u{2019}s Touch ID. Every sign-in needs your fingerprint."
+        case (4, true): return "Locked to this Mac\u{2019}s Secure Enclave. Every sign-in needs Touch ID, your Apple Watch or your password."
         default: return ""
         }
     }

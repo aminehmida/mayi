@@ -98,24 +98,30 @@ This is where levels differ in kind.
   own machines. On Android the app sandbox makes this harder, but a
   compromised device is still a lost device.
 - **Level 4 is cryptography.** Each level 4 secret's key is wrapped only to a
-  hardware key that the Secure Enclave (or Android Keystore) will not use
-  without a fresh biometric match. Malware cannot decrypt these without the
-  owner's finger on the sensor.
+  hardware key that will not be used without the owner: on Android, a fresh
+  biometric match; on a Mac, Touch ID, a paired Apple Watch, or the login
+  password, so that a closed lid or a missing Touch ID keyboard does not
+  block level 4. Malware cannot decrypt these without one of those.
 
 **Limits.** Malware can wait for the owner to unlock a level 4 secret
 legitimately and take it from the command's environment or from the short
 window during which an unlock is cached (up to 5 minutes for the same command
 and session; on Android the hardware key itself stays usable for 10 seconds
 after a match). It can also show the owner a misleading prompt. Level 4
-raises the cost; it does not make a compromised device safe.
+raises the cost; it does not make a compromised device safe. On a Mac,
+anyone who knows the login password, malware that captured it included, can
+unlock level 4 with it: accepting the password was chosen over a level 4
+that a closed lid blocks. Macs set up before v0.1.0-alpha.3 keep a
+fingerprint-only key until they set up their vault again.
 
 ### Theft of a device, or of a copy of the vault file
 
 - The file alone is useless: every value is sealed under keys that only a
   vault device's hardware, or the recovery key, can unwrap.
 - A stolen, locked device needs its passcode or biometrics as usual; level 4
-  additionally needs an enrolled fingerprint, and adding a fingerprint
-  invalidates the level 4 key.
+  additionally needs the owner: an enrolled fingerprint on a phone (adding
+  one invalidates the key), or on a Mac Touch ID, a paired watch or the
+  login password.
 - Removing the device from the vault stops it syncing and receiving new
   level 4 secrets, and lists what it could read.
 
@@ -187,7 +193,7 @@ What holds:
 - The website in a prompt is what the requester's browser reported, like
   the command of a `run`.
 - Keeping a site's two-factor key next to its password makes the vault the
-  one thing that protects both. Level 4 keeps both behind your fingerprint.
+  one thing that protects both. Level 4 keeps both behind your confirmation.
 - The debugging port lets any program running as you on that machine drive
   the browser. `mayi browser` gives the agent a separate profile, so your
   everyday sessions are not in it.

@@ -1,5 +1,11 @@
 package dev.mayi.android
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -26,6 +32,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -34,6 +42,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
 import dev.mayi.ffi.RequestInfo
 
 // A stock Material 3 app: the system's type, shapes and components, with one
@@ -171,6 +182,33 @@ fun CodeWell(text: String, maxLines: Int = Int.MAX_VALUE) {
                 .padding(horizontal = 12.dp, vertical = 10.dp),
         )
     }
+}
+
+/** A code for another device's camera: black on white in either theme. */
+@Composable
+fun QrCode(text: String, size: Dp = 220.dp) {
+    val bitmap = androidx.compose.runtime.remember(text) {
+        val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, 0, 0, mapOf(EncodeHintType.MARGIN to 1))
+        val pixels = IntArray(matrix.width * matrix.height) { i ->
+            if (matrix.get(i % matrix.width, i / matrix.width)) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+        }
+        Bitmap.createBitmap(pixels, matrix.width, matrix.height, Bitmap.Config.ARGB_8888).asImageBitmap()
+    }
+    Box(
+        Modifier.size(size).background(Color.White, RoundedCornerShape(12.dp)).padding(10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Image(bitmap, contentDescription = "QR code", filterQuality = FilterQuality.None, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+fun copyText(context: Context, label: String, text: String) {
+    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(label, text))
+}
+
+fun shareText(context: Context, text: String) {
+    val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+    context.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 }
 
 fun origin(request: RequestInfo) =

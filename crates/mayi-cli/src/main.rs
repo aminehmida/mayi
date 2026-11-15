@@ -8,6 +8,7 @@ mod config;
 mod fill;
 mod mask;
 mod mcp;
+mod session;
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -171,13 +172,17 @@ fn tcp_connect(address: &str, port: u16) -> io::Result<TcpStream> {
     Err(last)
 }
 
-/// Opens a session tunnel to a paired device, trying each known address,
-/// and asks it for the vault's current list of devices.
-fn connect_device(device: &Device, private: &[u8; 32]) -> io::Result<(Channel, Vec<Peer>)> {
+/// What a successful connection to a device returns: the conversation, the
+/// vault's current list of devices, and the address that worked.
+type Reached = (Channel, Vec<Peer>, String);
+
+/// Opens a session tunnel to a paired device, trying the address that worked
+/// last and then each announced one, and asks it for the vault's devices.
+fn connect_device(device: &Device, private: &[u8; 32]) -> io::Result<Reached> {
     let public = device.public()?;
     let mut last = io::Error::new(io::ErrorKind::NotFound, "no address known");
-    for address in &device.addresses {
-        let attempt = tcp_connect(address, device.port).and_then(|mut stream| {
+    for (address, port) in device.candidates() {
+        let attempt = tcp_connect(&address, port).and_then(|mut stream| {
             // Bound the handshake and the first exchange; afterwards the
             // device may take minutes to decide.
             stream.set_read_timeout(Some(CONNECT_TIMEOUT))?;
@@ -193,7 +198,10 @@ fn connect_device(device: &Device, private: &[u8; 32]) -> io::Result<(Channel, V
             Ok((Channel { reader: Box::new(reader), writer: Box::new(writer) }, peers))
         });
         match attempt {
-            Ok(connected) => return Ok(connected),
+            Ok((channel, peers)) => {
+                let shown = if address.contains(':') { format!("[{address}]") } else { address };
+                return Ok((channel, peers, format!("{shown}:{port}")));
+            }
             Err(e) => last = e,
         }
     }
@@ -214,7 +222,7 @@ fn wake(wake: &Wake) -> io::Result<()> {
 }
 
 /// Connects to a device, waking it first if it is asleep and can be woken.
-fn reach_device(device: &Device, private: &[u8; 32]) -> io::Result<(Channel, Vec<Peer>)> {
+fn reach_device(device: &Device, private: &[u8; 32]) -> io::Result<Reached> {
     let first = connect_device(device, private);
     let (Err(error), Some(gateway)) = (&first, &device.wake) else { return first };
     if wake(gateway).is_err() {
@@ -258,9 +266,15 @@ fn open_channel(remote_only: bool) -> Result<Channel, String> {
         let private = config.private_key().map_err(|e| e.to_string())?;
         for device in config.devices.clone() {
             match reach_device(&device, &private) {
-                Ok((channel, peers)) => {
-                    // Learn about devices added to or removed from the vault.
-                    if config.update_peers(&device, peers) {
+                Ok((channel, peers, reached)) => {
+                    // Keep the address that worked, and learn about devices
+                    // added to or removed from the vault.
+                    let mut changed = false;
+                    if let Some(known) = config.devices.iter_mut().find(|d| d.public_key == device.public_key) {
+                        changed = known.reached.as_deref() != Some(reached.as_str());
+                        known.reached = Some(reached);
+                    }
+                    if config.update_peers(&device, peers) || changed {
                         let _ = config.save();
                     }
                     return Ok(channel);
@@ -329,13 +343,17 @@ fn replies(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<ServerMsg> {
     rx
 }
 
-/// The agent and session to report, as given or as guessed.
+/// The agent and session to report, as given or as found: without a session
+/// from the agent, its own process is the session (see `session.rs`).
 fn requester_identity(agent: Option<String>, session: Option<String>) -> (String, String) {
     let agent = agent.unwrap_or_else(|| {
-        if std::env::var_os("CLAUDECODE").is_some() { "claude-code".into() } else { "unknown".into() }
+        if std::env::var_os("CLAUDECODE").is_some() {
+            "claude-code".into()
+        } else {
+            session::default_agent().unwrap_or_else(|| "unknown".into())
+        }
     });
-    // Without a session id from the agent, its process is the best proxy.
-    let session = session.unwrap_or_else(|| format!("ppid:{}", std::os::unix::process::parent_id()));
+    let session = session.unwrap_or_else(session::default_session);
     (agent, session)
 }
 
@@ -487,6 +505,7 @@ fn pair(token: String, name: Option<String>) -> Result<u8, Failure> {
                     addresses: token.addresses.clone(),
                     wake: None,
                     vault: None,
+                    reached: Some(format!("{address}:{}", token.port)),
                 });
                 config.save().map_err(fail)?;
                 println!("Paired with {device} as {name}.");

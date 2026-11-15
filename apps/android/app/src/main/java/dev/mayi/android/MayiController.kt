@@ -40,6 +40,10 @@ class MayiController(
         val machines: List<MachineRecord> = emptyList(),
         val log: List<AuditRecord> = emptyList(),
         val syncStatus: String? = null,
+        /** The machine that most recently finished pairing. */
+        val lastPaired: String? = null,
+        /** The device that most recently joined. */
+        val lastDeviceAdded: String? = null,
     )
 
     @Volatile
@@ -106,9 +110,15 @@ class MayiController(
         timer.schedule({ dismiss(runId); refresh() }, noticeLingerMs, TimeUnit.MILLISECONDS)
     }
 
-    override fun paired(name: String, id: String) = refresh()
+    override fun paired(name: String, id: String) {
+        update { it.copy(lastPaired = name) }
+        refresh()
+    }
 
-    override fun deviceAdded(name: String) = refresh()
+    override fun deviceAdded(name: String) {
+        update { it.copy(lastDeviceAdded = name) }
+        refresh()
+    }
 
     override fun synced(changed: ULong) = refresh()
 
@@ -148,7 +158,50 @@ class MayiController(
         login: Boolean = false, sites: List<String> = emptyList(),
     ): String? = attempt { it.putSecret(name, level, values, allow, maxGrantSecs, login, sites) }
 
+    /** Changes a secret's expected commands, websites and grant cap, keeping its values. */
+    fun updateRules(name: String, allow: List<String>, maxGrantSecs: ULong, sites: List<String>): String? =
+        attempt { it.updateRules(name, allow, maxGrantSecs, sites) }
+
     fun deleteSecret(name: String): String? = attempt { it.removeSecret(name) }
+
+    private fun <T> result(action: (VaultDevice) -> T): Result<T> {
+        val device = device ?: return Result.failure(IllegalStateException("The vault is not open."))
+        return try {
+            val value = action(device)
+            refresh()
+            Result.success(value)
+        } catch (e: MayiException) {
+            Result.failure(IllegalStateException(describe(e)))
+        }
+    }
+
+    /** An invitation for a machine to pair (`mayi pair TOKEN` there), valid for [ttlSecs]. */
+    fun startPairing(ttlSecs: ULong): Result<String> {
+        update { it.copy(lastPaired = null) }
+        return result { it.startPairing(emptyList(), ttlSecs) }
+    }
+
+    /** An invitation for a new device to scan or paste, valid for [ttlSecs]. */
+    fun startEnrolment(ttlSecs: ULong): Result<String> {
+        update { it.copy(lastDeviceAdded = null) }
+        return result { it.startEnrolment(emptyList(), ttlSecs) }
+    }
+
+    fun cancelInvitation() {
+        device?.cancelPairing()
+    }
+
+    /** Removes a device; returns the secrets it could read, to rotate. */
+    fun removeDevice(id: String): Result<List<String>> = result { it.removeDevice(id) }
+
+    /** Creates the offline recovery key, shown once. Blocks: may ask for a fingerprint. */
+    fun createRecoveryKey(): Result<String> =
+        result { it.createRecoveryKey("Share level 4 secrets with the recovery key") }
+
+    /** Whether the vault holds nothing yet, so joining another one loses nothing. */
+    val vaultIsEmpty: Boolean
+        get() = state.secrets.isEmpty() && state.machines.none { !it.revoked } &&
+            state.devices.none { !it.thisDevice && !it.removed }
 
     fun revokeMachine(id: String): String? = attempt { it.revokeMachine(id) }
 
