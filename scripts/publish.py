@@ -48,13 +48,11 @@ def sha256(path):
 # unmasked during evaluation, or else the owner's token from the GitHub CLI.
 TOKEN_RUBY = f'''  # The release files are in a private repository, so they are fetched
   # through the GitHub API with a token that can read it.
+  # Homebrew runs this with a reduced PATH, so gh is looked up in the
+  # caller's own.
   token = ENV.fetch("HOMEBREW_GITHUB_API_TOKEN", "").strip
-  if token.empty?
-    token = begin
-      Utils.popen_read("gh", "auth", "token", "--user", "{OWNER}").strip
-    rescue
-      ""
-    end
+  if token.empty? && (gh = which("gh", ORIGINAL_PATHS))
+    token = ::Utils.popen_read(gh.to_s, "auth", "token", "--user", "{OWNER}").strip
   end
   headers = ["Accept: application/octet-stream", "Authorization: Bearer #{{token}}"]
 '''
