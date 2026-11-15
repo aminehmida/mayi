@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Where the app keeps its files. Overridable through the environment so
@@ -111,9 +112,10 @@ public final class AppModel: ObservableObject {
 
     /// Opens (or creates) the vault and starts serving requesters.
     ///
-    /// A prompt nobody answers within `approvalTimeout` seconds is denied.
+    /// A prompt nobody answers within `approvalTimeout` seconds is denied;
+    /// the requester usually gives up first, which takes the prompt down.
     public func start(
-        keys: KeyStore, paths: MayiPaths, deviceName: String, approvalTimeout: TimeInterval = 300
+        keys: KeyStore, paths: MayiPaths, deviceName: String, approvalTimeout: TimeInterval = 3600
     ) throws {
         try FileManager.default.createDirectory(
             at: paths.home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -121,6 +123,7 @@ public final class AppModel: ObservableObject {
         let device = try VaultDevice.open(
             vaultPath: paths.vault.path, deviceName: deviceName, keys: keys, ui: bridge)
         try device.serve(socketPath: paths.socket)
+        try? device.setLocalEnrol(allowed: localEnrol)
         self.bridge = bridge
         self.device = device
         self.paths = paths
@@ -140,7 +143,23 @@ public final class AppModel: ObservableObject {
 
     // MARK: Other devices of the vault
 
-    private var hasOtherDevices: Bool { devices.contains { !$0.thisDevice && !$0.removed && !$0.recovery } }
+    public var hasOtherDevices: Bool { devices.contains { !$0.thisDevice && !$0.removed && !$0.recovery } }
+
+    /// Whether `mayi` on this Mac may pair itself with the vault, so agents
+    /// here can also ask the other devices, such as a phone when you are away.
+    @Published public private(set) var localEnrol: Bool =
+        UserDefaults.standard.object(forKey: "localEnrol") as? Bool ?? true
+
+    public func setLocalEnrol(_ allowed: Bool) {
+        localEnrol = allowed
+        UserDefaults.standard.set(allowed, forKey: "localEnrol")
+        guard let device else { return }
+        // Turning it off revokes the pairing and tells the other devices.
+        Task.detached {
+            try? device.setLocalEnrol(allowed: allowed)
+            await MainActor.run { self.refresh() }
+        }
+    }
 
     /// Asked to restart the app, after the vault was set aside to join another.
     public var onRestart: (() -> Void)?
@@ -291,7 +310,7 @@ public final class AppModel: ObservableObject {
     private func listenForMachines() -> Bool {
         guard let device, let paths else { return false }
         do {
-            _ = try device.serveRemote(port: paths.port, addresses: paths.advertise, wake: nil)
+            _ = try device.serveRemote(port: paths.port, addresses: paths.advertise)
             remoteError = nil
             return true
         } catch {
@@ -428,6 +447,28 @@ public final class AppModel: ObservableObject {
     }
 
     /// Changes the allowed commands or websites and the approval lifetime, keeping the values.
+    /// A secret's values for its owner to see, after Touch ID or the login
+    /// password; for a level 4 secret, the check that unlocks it does that.
+    /// Logged in Activity.
+    public func revealSecret(_ secret: SecretRecord) async -> Result<RevealedSecret, DraftError> {
+        guard let device else { return .failure("The vault is not open.") }
+        let name = secret.name
+        if secret.level < 4 {
+            guard await presence.confirm(reason: "show \(name)") else {
+                return .failure("Showing values needs you to confirm, with Touch ID or your password.")
+            }
+        }
+        let result = await Task.detached { () -> Result<RevealedSecret, DraftError> in
+            do {
+                return .success(try device.revealSecret(name: name, prompt: "show \(name)"))
+            } catch {
+                return .failure(DraftError(stringLiteral: describe(error)))
+            }
+        }.value
+        refresh()
+        return result
+    }
+
     public func updateRules(name: String, allow: [String], maxGrantSecs: UInt64, sites: [String] = []) -> String? {
         guard let device else { return "The vault is not open." }
         do {
@@ -510,5 +551,27 @@ final class UiBridge: UiDelegate, @unchecked Sendable {
 
     func finished(runId: UInt64, exitCode: Int32?) {
         DispatchQueue.main.async { [model] in MainActor.assumeIsolated { model?.finished(runId: runId) } }
+    }
+
+    func userActive() -> Bool {
+        UserPresence.isActive()
+    }
+
+    /// A Mac does not sleep mid-request the way a phone does.
+    func incoming() {}
+}
+
+/// Whether someone is at this Mac: the screen is unlocked and there was
+/// keyboard, mouse or trackpad input in the last two minutes. Requesters ask
+/// the device in use first.
+enum UserPresence {
+    static func isActive() -> Bool {
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+            session["CGSSessionScreenIsLocked"] as? Bool == true
+        {
+            return false
+        }
+        let anyInput = CGEventType(rawValue: ~0)!
+        return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput) < 120
     }
 }

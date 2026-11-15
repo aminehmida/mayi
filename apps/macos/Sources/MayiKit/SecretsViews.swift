@@ -1,21 +1,74 @@
+import AppKit
 import SwiftUI
 
 public struct SecretEditor: View {
     let existing: SecretRecord?
+    /// Decrypts the stored values once the owner confirms. Without it, the
+    /// editor cannot show them.
+    let onReveal: (() async -> Result<RevealedSecret, DraftError>)?
+    /// Show the values as soon as the editor opens.
+    let revealOnOpen: Bool
     let onSave: (SecretDraft.Change) -> String?
     let onCancel: () -> Void
     @State var draft: SecretDraft
     @State var error: String?
+    @State private var revealing = false
+    /// A login's current two-factor code, and when it stops being valid.
+    @State private var code: (value: String, until: Date)?
 
     public init(
         existing: SecretRecord?, draft: SecretDraft? = nil, error: String? = nil,
+        onReveal: (() async -> Result<RevealedSecret, DraftError>)? = nil, revealOnOpen: Bool = false,
         onSave: @escaping (SecretDraft.Change) -> String?, onCancel: @escaping () -> Void
     ) {
         self.existing = existing
+        self.onReveal = onReveal
+        self.revealOnOpen = revealOnOpen
         self.onSave = onSave
         self.onCancel = onCancel
         _draft = State(initialValue: draft ?? existing.map(SecretDraft.init(editing:)) ?? SecretDraft())
         _error = State(initialValue: error)
+    }
+
+    private var shown: Bool { draft.shown != nil }
+
+    private func reveal() async {
+        guard let onReveal else { return }
+        revealing = true
+        error = nil
+        switch await onReveal() {
+        case .success(let revealed):
+            draft.show(revealed)
+            code = revealed.code.map { ($0, Date().addingTimeInterval(TimeInterval(revealed.codeValidSecs))) }
+        case .failure(let problem):
+            error = problem.message
+        }
+        revealing = false
+    }
+
+    /// Where the stored values are shown, or the button that shows them.
+    @ViewBuilder private var showValues: some View {
+        if existing != nil, onReveal != nil, !shown {
+            Button {
+                Task { await reveal() }
+            } label: {
+                Label(revealing ? "Waiting for You\u{2026}" : "Show Values", systemImage: "eye")
+            }
+            .disabled(revealing)
+        }
+    }
+
+    /// A value field: hidden while typing a new one, readable once shown.
+    @ViewBuilder private func valueField(_ title: String, _ text: Binding<String>, prompt: String?) -> some View {
+        if shown {
+            HStack {
+                TextField(title, text: text, prompt: prompt.map { Text($0) })
+                    .font(.system(.body, design: .monospaced))
+                CopyButton(value: text.wrappedValue)
+            }
+        } else {
+            SecureField(title, text: text, prompt: prompt.map { Text($0) })
+        }
     }
 
     public var body: some View {
@@ -76,9 +129,12 @@ public struct SecretEditor: View {
             .padding(.vertical, 12)
         }
         .frame(width: 500, height: 620)
+        .task {
+            if revealOnOpen { await reveal() }
+        }
     }
 
-    private var keep: String? { existing == nil ? nil : "unchanged" }
+    private var keep: String? { existing == nil || shown ? nil : "unchanged" }
 
     @ViewBuilder private var loginSections: some View {
         Section {
@@ -95,16 +151,38 @@ public struct SecretEditor: View {
         }
 
         Section {
-            TextField("Username", text: $draft.username, prompt: Text(keep ?? "optional"))
-            SecureField("Password", text: $draft.password, prompt: Text(keep ?? "required"))
-            SecureField("Two-Factor Key", text: $draft.twoFactorKey, prompt: Text(keep ?? "optional"))
+            HStack {
+                TextField("Username", text: $draft.username, prompt: Text(keep ?? "optional"))
+                if shown { CopyButton(value: draft.username) }
+            }
+            valueField("Password", $draft.password, prompt: keep ?? "required")
+            valueField("Two-Factor Key", $draft.twoFactorKey, prompt: keep ?? "optional")
+            if let code {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let left = Int(code.until.timeIntervalSince(context.date).rounded(.up))
+                    if left > 0 {
+                        HStack {
+                            Text("Code now")
+                            Spacer()
+                            Text(code.value).font(.system(.body, design: .monospaced))
+                            Text("for \(left) s").foregroundStyle(.secondary).monospacedDigit()
+                            CopyButton(value: code.value)
+                        }
+                    } else {
+                        Button("Show the Next Code") { Task { await reveal() } }
+                    }
+                }
+            }
+            showValues
         } header: {
             Text("Sign-In")
         } footer: {
             Text(
                 existing == nil
                     ? "The two-factor key is the setup key or otpauth:// link a site shows when you turn on an authenticator app. It stays on your devices: a page only ever gets the current code."
-                    : "Leave all three empty to keep what is stored. Changing the level needs the password again."
+                    : shown
+                        ? "Edit what you need and save. Copied values are cleared from the clipboard after a minute."
+                        : "Leave all three empty to keep what is stored, or show them to read and edit them. Changing the level needs the password again."
             )
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -131,7 +209,7 @@ public struct SecretEditor: View {
                                 .labelsHidden()
                                 .font(.system(.body, design: .monospaced))
                                 .frame(width: 120)
-                            SecureField("Value", text: $field.value, prompt: Text(existing == nil ? "value" : "unchanged"))
+                            valueField("Value", $field.value, prompt: existing == nil ? "value" : keep)
                                 .labelsHidden()
                             Button {
                                 draft.fields.removeAll { $0.id == field.id }
@@ -145,12 +223,17 @@ public struct SecretEditor: View {
                     }
                     Button("Add Field") { draft.fields.append(.init(name: "")) }
                         .buttonStyle(.borderless)
+                    showValues
                 } header: {
                     Text("Value")
                 } footer: {
                     if existing != nil {
-                        Text("Leave empty to keep what is stored. Changing the level needs the value again.")
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(
+                            shown
+                                ? "Edit what you need and save. Copied values are cleared from the clipboard after a minute."
+                                : "Leave empty to keep what is stored, or show it to read and edit it. Changing the level needs the value again."
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
 
@@ -200,7 +283,12 @@ struct SecretRow: View {
                 .frame(width: 18)
                 .accessibilityLabel(secret.login ? "Website login" : "Secret")
             VStack(alignment: .leading, spacing: 2) {
-                Text(secret.name).font(.system(.body, design: .monospaced))
+                HStack(spacing: 6) {
+                    Text(secret.name).font(.system(.body, design: .monospaced))
+                    if secret.copies < 2 {
+                        OneCopyDot()
+                    }
+                }
                 Text(summary).font(.callout).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
@@ -209,6 +297,41 @@ struct SecretRow: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Marks a secret that exists only on this Mac, so it is lost if the Mac is.
+struct OneCopyDot: View {
+    var body: some View {
+        Circle()
+            .fill(.orange)
+            .frame(width: 8, height: 8)
+            .help("Only on this Mac. It reaches your other devices when they next sync; add a device to keep a second copy.")
+            .accessibilityLabel("Only on this Mac")
+    }
+}
+
+/// Copies a value, marked so clipboard managers skip it, and clears it from
+/// the clipboard after a minute unless something else was copied since.
+struct CopyButton: View {
+    let value: String
+
+    var body: some View {
+        Button {
+            let board = NSPasteboard.general
+            board.clearContents()
+            board.setString(value, forType: .string)
+            board.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+            let copied = board.changeCount
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+                if board.changeCount == copied { board.clearContents() }
+            }
+        } label: {
+            Image(systemName: "doc.on.doc")
+        }
+        .buttonStyle(.borderless)
+        .disabled(value.isEmpty)
+        .help("Copy; cleared from the clipboard after a minute")
     }
 }
 
@@ -222,17 +345,27 @@ public struct SecretsView: View {
     private enum EditorTarget: Identifiable {
         case new
         case edit(SecretRecord)
+        /// Edit, showing the values first.
+        case show(SecretRecord)
 
         var id: String {
             switch self {
             case .new: return ""
-            case .edit(let secret): return secret.name
+            case .edit(let secret): return "edit:" + secret.name
+            case .show(let secret): return "show:" + secret.name
             }
         }
 
         var existing: SecretRecord? {
-            if case .edit(let secret) = self { return secret }
-            return nil
+            switch self {
+            case .new: return nil
+            case .edit(let secret), .show(let secret): return secret
+            }
+        }
+
+        var revealsAtOnce: Bool {
+            if case .show = self { return true }
+            return false
         }
     }
 
@@ -253,6 +386,7 @@ public struct SecretsView: View {
         .listStyle(.inset)
         .contextMenu(forSelectionType: String.self) { names in
             if let secret = secret(names.first) {
+                Button("Show Values\u{2026}") { editor = .show(secret) }
                 Button("Edit\u{2026}") { editor = .edit(secret) }
                 Button("Delete\u{2026}", role: .destructive) { confirmDelete = secret.name }
             }
@@ -274,6 +408,13 @@ public struct SecretsView: View {
         .navigationTitle("Secrets")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    if let secret = secret(selection) { editor = .show(secret) }
+                } label: {
+                    Label("Show Values", systemImage: "eye")
+                }
+                .disabled(secret(selection) == nil)
+                .help("Show the selected secret's values, after you confirm")
                 Button {
                     if let secret = secret(selection) { editor = .edit(secret) }
                 } label: {
@@ -299,6 +440,8 @@ public struct SecretsView: View {
         .sheet(item: $editor) { target in
             SecretEditor(
                 existing: target.existing,
+                onReveal: target.existing.map { secret in { await model.revealSecret(secret) } },
+                revealOnOpen: target.revealsAtOnce,
                 onSave: { change in
                     let problem = apply(change)
                     if problem == nil { editor = nil }
@@ -430,6 +573,8 @@ struct ActivityRow: View {
             return names.isEmpty ? "Request refused" : "Refused \(names)"
         case "stop":
             return signIn ? "Sign-in stopped by you" : "Command stopped by you"
+        case "view":
+            return "You viewed \(names) on this Mac"
         default:
             // A sign-in's "command" is the typing; its exit says whether that worked.
             if signIn {
@@ -450,6 +595,7 @@ struct ActivityRow: View {
         switch entry.event {
         case "request": return released ? "key" : "xmark.circle"
         case "stop": return "stop.circle"
+        case "view": return "eye"
         default: return "checkmark"
         }
     }
@@ -457,7 +603,9 @@ struct ActivityRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: symbol)
-                .foregroundStyle(entry.event == "request" && released ? AnyShapeStyle(.primary) : entry.event == "exit" ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.red))
+                .foregroundStyle(
+                    (entry.event == "request" && released) || entry.event == "view"
+                        ? AnyShapeStyle(.primary) : entry.event == "exit" ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.red))
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)

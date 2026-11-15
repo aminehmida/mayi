@@ -74,6 +74,22 @@ prints how to connect your tool to it.
 - SMS or email codes, push approvals and security keys are not in Mayi: ask
   the user.
 
+## When the user takes a while to answer
+
+The request goes to all of the user's devices and waits: up to an hour for
+one of them to be reachable (a phone may be out of range; `--wait SECONDS`),
+then up to 15 minutes for the answer (`--timeout SECONDS`). `mayi` prints a
+line only when something changes, such as
+`mayi: asked Pixel; waiting up to 15 min for your answer`.
+
+- Waiting costs nothing. Do not poll, and do not retry in a loop.
+- If your tool cuts off long commands, run `mayi` in the background and let
+  it tell you when it ends. In Claude Code: the Bash tool with
+  `run_in_background: true` and `timeout: 4500000` (75 minutes). Carry on with
+  other work meanwhile.
+- If you need to know quickly, pass shorter limits, such as
+  `--wait 60 --timeout 120`.
+
 ## Rules
 
 1. **Ask for the narrowest thing.** Request only the secrets the command
@@ -96,8 +112,8 @@ prints how to connect your tool to it.
 | Code | Meaning | What to do |
 |---|---|---|
 | 77 | Denied by the user, the fingerprint check failed, or the secret cannot be used that way (a login with `mayi run`). | Do not retry. Tell the user. |
-| 75 | No decision in time (default 120 s; `--timeout SECONDS`). | Tell the user a request is waiting; retry once if they ask. |
-| 69 | No vault device reachable, or this machine is not paired. | Tell the user; they may need to open Mayi or run `mayi pair`. |
+| 75 | A device showed the request but nobody answered in time (default 15 min; `--timeout SECONDS`). | Tell the user a request is waiting; retry once if they ask. |
+| 69 | None of the user's devices could be reached in time (default 1 hour; `--wait SECONDS`), or this machine is not paired. The message says when each device was last reached. | Tell the user; they may need to open Mayi on their phone, connect Tailscale, or run `mayi pair`. |
 | 65 | `mayi fill` could not fill the page: no sign-in field, another website, a refused form, or the page changed. | Read the message; fix the page or the selector, or ask the user. |
 | 64 | Bad arguments, or `mayi fill` given a secret that is not a login. | Fix the command. |
 

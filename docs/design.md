@@ -4,7 +4,9 @@
 > Where the result differs, the code and the other documents are right:
 > pairing uses a pasted token rather than a short code, devices publish their
 > addresses instead of using mDNS, notices are a floating panel rather than
-> system notifications, and the wake-up gateway lives in `services/wake`.
+> system notifications, and there is no push service: the phone keeps its
+> port open while it sleeps, and a request goes to every device and waits
+> for one to come online (see `docs/protocol.md`, "Reaching devices").
 
 ## Context
 

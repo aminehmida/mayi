@@ -168,6 +168,12 @@ pub trait UiDelegate: Send + Sync {
     fn device_added(&self, name: String);
     /// A sync with another device changed records here: refresh what is shown.
     fn synced(&self, changed: u64);
+    /// Whether the owner is using this device right now (unlocked, recent
+    /// input). Requesters ask the device in use first.
+    fn user_active(&self) -> bool;
+    /// Another machine just connected: a phone stays awake for a moment so
+    /// its request can arrive.
+    fn incoming(&self);
 }
 
 struct UiAdapter(Arc<dyn UiDelegate>);
@@ -241,6 +247,14 @@ impl Ui for UiAdapter {
     fn synced(&self, changed: usize) {
         self.0.synced(changed as u64);
     }
+
+    fn user_active(&self) -> bool {
+        self.0.user_active()
+    }
+
+    fn incoming(&self) {
+        self.0.incoming();
+    }
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -273,6 +287,26 @@ pub struct SecretRecord {
     /// A website login: typed only into one of `sites`, never given to a command.
     pub login: bool,
     pub sites: Vec<String>,
+    /// How many devices hold its current version, as far as this one knows.
+    /// With 1, it is lost if this device is.
+    pub copies: u32,
+}
+
+/// One field of a secret, decrypted to show its owner.
+#[derive(Clone, uniffi::Record)]
+pub struct RevealedField {
+    pub name: String,
+    pub value: String,
+}
+
+/// A secret's values, to show its owner in the app.
+#[derive(Clone, uniffi::Record)]
+pub struct RevealedSecret {
+    pub fields: Vec<RevealedField>,
+    /// For a login with a two-factor key: the code valid now, and for how
+    /// many more seconds.
+    pub code: Option<String>,
+    pub code_valid_secs: u64,
 }
 
 impl From<ItemMeta> for SecretRecord {
@@ -286,6 +320,8 @@ impl From<ItemMeta> for SecretRecord {
             version: m.version,
             login: m.kind == Kind::Login,
             sites: m.sites,
+            // Only on this device until the next sync.
+            copies: 1,
         }
     }
 }
@@ -324,6 +360,9 @@ pub struct MachineRecord {
     pub name: String,
     pub added_ms: u64,
     pub revoked: bool,
+    /// For the machine a vault device runs on, which enrolled itself through
+    /// that device: the device's name.
+    pub runs_device: Option<String>,
 }
 
 /// A device holding the vault.
@@ -347,13 +386,6 @@ pub struct SyncResult {
     pub changed: Option<u64>,
     /// Why it was not reached, otherwise.
     pub error: Option<String>,
-}
-
-/// Where a sleeping device can be woken: see `mayi_proto::Wake`.
-#[derive(Clone, uniffi::Record)]
-pub struct WakeInfo {
-    pub url: String,
-    pub id: String,
 }
 
 /// Redeems an enrolment token from another device: creates this device's
@@ -467,14 +499,9 @@ impl VaultDevice {
 
     /// Starts accepting paired machines and other devices on a TCP port (0
     /// picks a free one) and returns the port in use. Publishes `addresses`
-    /// (empty means this device's own network addresses) and `wake` to the
-    /// rest of the vault. Calling it again only republishes.
-    pub fn serve_remote(
-        &self,
-        port: u16,
-        addresses: Vec<String>,
-        wake: Option<WakeInfo>,
-    ) -> Result<u16, MayiError> {
+    /// (empty means this device's own network addresses) to the rest of the
+    /// vault. Calling it again only republishes.
+    pub fn serve_remote(&self, port: u16, addresses: Vec<String>) -> Result<u16, MayiError> {
         let mut current = self.remote_port.lock().unwrap_or_else(|e| e.into_inner());
         let port = match *current {
             Some(port) => port,
@@ -489,8 +516,7 @@ impl VaultDevice {
         };
         let addresses =
             if addresses.is_empty() { mayi_core::server::local_addresses() } else { addresses };
-        let wake = wake.map(|w| mayi_proto::Wake { url: w.url, id: w.id });
-        self.server.announce(port, addresses, wake)?;
+        self.server.announce(port, addresses)?;
         Ok(port)
     }
 
@@ -581,12 +607,27 @@ impl VaultDevice {
 
     /// Every machine ever paired, including revoked ones.
     pub fn machines(&self) -> Result<Vec<MachineRecord>, MayiError> {
-        Ok(self
-            .vault()
+        let vault = self.vault();
+        let devices = vault.devices()?;
+        let device_name = |id: &str| devices.iter().find(|d| d.id == id).map(|d| d.name.clone());
+        Ok(vault
             .requesters()?
             .into_iter()
-            .map(|r| MachineRecord { id: r.id, name: r.name, added_ms: r.added_ms, revoked: r.revoked })
+            .map(|r| MachineRecord {
+                runs_device: r.local_to.as_deref().and_then(device_name),
+                id: r.id,
+                name: r.name,
+                added_ms: r.added_ms,
+                revoked: r.revoked,
+            })
             .collect())
+    }
+
+    /// Whether `mayi` on this machine may pair itself with the vault through
+    /// the local socket, so agents here can also ask the other devices.
+    /// Turning it off revokes the machine it paired.
+    pub fn set_local_enrol(&self, allowed: bool) -> Result<(), MayiError> {
+        Ok(self.server.set_local_enrol(allowed)?)
     }
 
     /// Stops accepting requests from a machine. Returns the names of the
@@ -601,7 +642,38 @@ impl VaultDevice {
     }
 
     pub fn list_secrets(&self) -> Result<Vec<SecretRecord>, MayiError> {
-        Ok(self.vault().list()?.into_iter().map(Into::into).collect())
+        let vault = self.vault();
+        let copies = vault.copies()?;
+        Ok(vault
+            .list()?
+            .into_iter()
+            .map(|meta| {
+                let count = copies.get(&meta.id).copied().unwrap_or(1);
+                SecretRecord { copies: count, ..meta.into() }
+            })
+            .collect())
+    }
+
+    /// A secret's values, to show its owner. Confirm the owner is present
+    /// first: this asks nothing for levels 1 to 3, and for level 4 only the
+    /// biometric check that unlocks it, showing `prompt`. Logged as viewed.
+    pub fn reveal_secret(&self, name: String, prompt: String) -> Result<RevealedSecret, MayiError> {
+        let (meta, values) = self.vault().view(&name, &prompt)?;
+        let fields: Vec<RevealedField> = meta
+            .fields
+            .iter()
+            .filter_map(|f| values.get(f).map(|v| RevealedField { name: f.clone(), value: v.to_string() }))
+            .collect();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let totp = values.get(mayi_proto::FIELD_TOTP).and_then(|key| mayi_core::totp::Totp::parse(key).ok());
+        Ok(RevealedSecret {
+            fields,
+            code: totp.as_ref().map(|t| t.code(now).to_string()),
+            code_valid_secs: totp.map(|t| t.valid_for(now)).unwrap_or(0),
+        })
     }
 
     /// Creates a secret or replaces the one with the same name. A login

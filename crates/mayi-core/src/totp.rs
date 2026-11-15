@@ -95,6 +95,11 @@ impl Totp {
         Ok(totp)
     }
 
+    /// How many seconds the code valid at `unix_secs` stays valid.
+    pub fn valid_for(&self, unix_secs: u64) -> u64 {
+        self.period - unix_secs % self.period
+    }
+
     /// The code valid at `unix_secs`.
     pub fn code(&self, unix_secs: u64) -> Zeroizing<String> {
         let counter = (unix_secs / self.period).to_be_bytes();

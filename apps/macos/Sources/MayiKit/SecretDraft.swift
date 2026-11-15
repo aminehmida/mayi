@@ -42,6 +42,9 @@ public struct SecretDraft: Equatable {
     public var twoFactorKey = ""
     /// One website per line.
     public var sitesText = ""
+    /// The stored values, once shown to the owner: saving them unchanged
+    /// changes only the rules. Nil until shown.
+    public var shown: [String: String]?
 
     public init() {}
 
@@ -53,6 +56,20 @@ public struct SecretDraft: Equatable {
         allowText = secret.allow.joined(separator: "\n")
         sitesText = secret.sites.joined(separator: "\n")
         maxGrantMinutes = Int(secret.maxGrantSecs / 60)
+    }
+
+    /// Fills the fields with the stored values, so they can be read and edited.
+    public mutating func show(_ revealed: RevealedSecret) {
+        var values: [String: String] = [:]
+        for field in revealed.fields { values[field.name] = field.value }
+        shown = values
+        if login {
+            username = values["username"] ?? ""
+            password = values["password"] ?? ""
+            twoFactorKey = values["totp"] ?? ""
+        } else {
+            fields = revealed.fields.map { Field(name: $0.name, value: $0.value) }
+        }
     }
 
     private static func lines(_ text: String) -> [String] {
@@ -88,6 +105,9 @@ public struct SecretDraft: Equatable {
             return .failure("Enter a value for every field.")
         }
         let values = Dictionary(uniqueKeysWithValues: zip(names, fields.map(\.value)))
+        if let existing, values == shown, level == existing.level {
+            return .success(.rules(name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: []))
+        }
         return .success(
             .put(name: name, level: level, values: values, allow: allow, maxGrantSecs: maxGrantSecs, login: false, sites: []))
     }
@@ -107,6 +127,9 @@ public struct SecretDraft: Equatable {
         if !user.isEmpty { values["username"] = user }
         let key = twoFactorKey.trimmingCharacters(in: .whitespaces)
         if !key.isEmpty { values["totp"] = key }
+        if let existing, values == shown, level == existing.level {
+            return .success(.rules(name: name, allow: [], maxGrantSecs: maxGrantSecs, sites: sites))
+        }
         return .success(
             .put(name: name, level: level, values: values, allow: [], maxGrantSecs: maxGrantSecs, login: true, sites: sites))
     }

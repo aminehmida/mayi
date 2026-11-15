@@ -4,14 +4,20 @@
 //! There is deliberately no tool that returns a secret's value. A command's
 //! output comes back with the values masked, exactly as `mayi run` prints it.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::{mpsc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// More output than this is cut, so one command cannot flood the context.
 const MAX_OUTPUT: usize = 60_000;
+/// While a call waits for a device or for the user, the client hears this
+/// often that it is still going, which keeps some clients from giving up.
+const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
 const INSTRUCTIONS: &str = "Mayi lets you use the user's secrets without seeing them. \
 Call list_secrets to learn which names exist, then run_with_secrets to run a command with \
@@ -46,9 +52,13 @@ fn tools() -> Value {
                         "type": "string",
                         "description": "Why the secrets are needed, in a sentence the user can judge. It is shown to them and logged."
                     },
+                    "wait_seconds": {
+                        "type": "integer", "minimum": 1,
+                        "description": "How long to keep trying the user's devices until one takes the request; a phone may be out of reach for a while. Default 3600."
+                    },
                     "timeout_seconds": {
                         "type": "integer", "minimum": 1,
-                        "description": "How long to wait for the user's decision. Default 120."
+                        "description": "How long to wait for the user's decision once a device has the request. Default 900."
                     }
                 },
                 "required": ["command", "secrets", "reason"],
@@ -74,9 +84,13 @@ fn tools() -> Value {
                         "type": "string",
                         "description": "CSS selector of the button to click to submit, for a form that Enter does not submit. By default Mayi presses Enter."
                     },
+                    "wait_seconds": {
+                        "type": "integer", "minimum": 1,
+                        "description": "How long to keep trying the user's devices until one takes the request. Default 600."
+                    },
                     "timeout_seconds": {
                         "type": "integer", "minimum": 1,
-                        "description": "How long to wait for the user's decision. Default 120."
+                        "description": "How long to wait for the user's decision once a device has the request. Default 900."
                     }
                 },
                 "required": ["login", "reason"],
@@ -102,16 +116,76 @@ fn clip(bytes: &[u8]) -> String {
     format!("{}\n[output cut after {MAX_OUTPUT} bytes]", &text[..end])
 }
 
+/// Where to report that a call is still going: the client's progress token
+/// and a way to send it a notification.
+struct Progress<'a> {
+    token: Value,
+    send: &'a (dyn Fn(Value) + Sync),
+}
+
+impl Progress<'_> {
+    fn report(&self, count: u64, message: &str) {
+        (self.send)(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": { "progressToken": self.token, "progress": count, "message": message },
+        }));
+    }
+}
+
 /// Runs this same program as `mayi <args>`, so the MCP tools behave exactly
-/// like the command line, masking included.
-fn run_self(args: &[String]) -> Result<(Option<i32>, String, String), String> {
+/// like the command line, masking included. What `mayi` says while it waits
+/// ("waiting for your devices", "asked Pixel") goes to the client as
+/// progress, when it asked for that.
+fn run_self(args: &[String], progress: Option<&Progress>) -> Result<(Option<i32>, String, String), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let output = Command::new(exe)
+    let mut child = Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
-    Ok((output.status.code(), clip(&output.stdout), clip(&output.stderr)))
+    let mut stdout = child.stdout.take().expect("piped");
+    let out = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr = child.stderr.take().expect("piped");
+    let (lines, said) = mpsc::channel::<String>();
+    let err = thread::spawn(move || {
+        let (mut all, mut line) = (Vec::new(), Vec::new());
+        let mut reader = io::BufReader::new(stderr);
+        while reader.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+            all.extend_from_slice(&line);
+            let _ = lines.send(String::from_utf8_lossy(&line).trim().to_string());
+            line.clear();
+        }
+        all
+    });
+    let (mut count, mut latest) = (0u64, "Mayi is working on it".to_string());
+    loop {
+        match said.recv_timeout(PROGRESS_EVERY) {
+            // What reach.rs says while waiting; not the command's output, nor
+            // the error mayi ends with.
+            Ok(line) => match line.strip_prefix("mayi: ") {
+                Some(text) if ["waiting for ", "asked ", "also asked "].iter().any(|w| text.starts_with(w)) => {
+                    latest = text.to_string()
+                }
+                _ => continue,
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if let Some(progress) = progress {
+            count += 1;
+            progress.report(count, &latest);
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    Ok((status.code(), clip(&out), clip(&err)))
 }
 
 fn strings(value: Option<&Value>, what: &str) -> Result<Vec<String>, String> {
@@ -128,7 +202,8 @@ fn run_args(arguments: &Value, client: &str) -> Result<Vec<String>, String> {
     let secrets = strings(arguments.get("secrets"), "secrets")?;
     let reason = arguments.get("reason").and_then(Value::as_str).map(str::trim).filter(|r| !r.is_empty());
     let reason = reason.ok_or("reason must be a non-empty string")?;
-    let timeout = arguments.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(120);
+    let wait = arguments.get("wait_seconds").and_then(Value::as_u64).unwrap_or(3600);
+    let timeout = arguments.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(900);
     let mut args = vec!["run".to_string()];
     for secret in secrets {
         // As one argument each, so a value starting with `-` cannot become a flag.
@@ -137,6 +212,7 @@ fn run_args(arguments: &Value, client: &str) -> Result<Vec<String>, String> {
     args.push(format!("--reason={reason}"));
     args.push(format!("--agent={client}"));
     args.push(format!("--session=mcp:{}", std::os::unix::process::parent_id()));
+    args.push(format!("--wait={wait}"));
     args.push(format!("--timeout={timeout}"));
     args.push("--".into());
     args.extend(command);
@@ -148,12 +224,14 @@ fn fill_args(arguments: &Value, client: &str) -> Result<Vec<String>, String> {
     let text = |name: &str| arguments.get(name).and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
     let login = text("login").ok_or("login must be a non-empty string")?;
     let reason = text("reason").ok_or("reason must be a non-empty string")?;
-    let timeout = arguments.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(120);
+    let wait = arguments.get("wait_seconds").and_then(Value::as_u64).unwrap_or(600);
+    let timeout = arguments.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(900);
     let mut args = vec![
         "fill".to_string(),
         format!("--reason={reason}"),
         format!("--agent={client}"),
         format!("--session=mcp:{}", std::os::unix::process::parent_id()),
+        format!("--wait={wait}"),
         format!("--timeout={timeout}"),
     ];
     if let Some(tab) = text("tab") {
@@ -168,19 +246,21 @@ fn fill_args(arguments: &Value, client: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
-fn call_tool(params: &Value, client: &str) -> Value {
+fn call_tool(params: &Value, client: &str, send: &(dyn Fn(Value) + Sync)) -> Value {
     let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let progress = params.pointer("/_meta/progressToken").map(|token| Progress { token: token.clone(), send });
+    let progress = progress.as_ref();
     let outcome = match params.get("name").and_then(Value::as_str) {
-        Some("list_secrets") => run_self(&["list".to_string()]).map(|(code, out, err)| {
+        Some("list_secrets") => run_self(&["list".to_string()], progress).map(|(code, out, err)| {
             if code == Some(0) { (out, false) } else { (err, true) }
         }),
-        Some("run_with_secrets") => run_args(&arguments, client).and_then(|args| run_self(&args)).map(
+        Some("run_with_secrets") => run_args(&arguments, client).and_then(|args| run_self(&args, progress)).map(
             |(code, out, err)| {
                 let code_text = code.map_or("killed by a signal".to_string(), |c| c.to_string());
                 (format!("exit code: {code_text}\n--- stdout ---\n{out}\n--- stderr ---\n{err}"), code != Some(0))
             },
         ),
-        Some("fill_login") => fill_args(&arguments, client).and_then(|args| run_self(&args)).map(
+        Some("fill_login") => fill_args(&arguments, client).and_then(|args| run_self(&args, progress)).map(
             |(code, out, err)| if code == Some(0) { (out, false) } else { (err, true) },
         ),
         other => Err(format!("unknown tool: {}", other.unwrap_or("(none)"))),
@@ -191,8 +271,9 @@ fn call_tool(params: &Value, client: &str) -> Value {
     }
 }
 
-/// Answers one JSON-RPC message. Notifications get no answer.
-fn handle(message: &Value, client: &mut String) -> Option<Value> {
+/// Answers one JSON-RPC message. Notifications get no answer. `send`
+/// writes a notification to the client while a call is still running.
+fn handle(message: &Value, client: &mut String, send: &(dyn Fn(Value) + Sync)) -> Option<Value> {
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -212,7 +293,7 @@ fn handle(message: &Value, client: &mut String) -> Option<Value> {
         }
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
-        "tools/call" => Ok(call_tool(&params, client)),
+        "tools/call" => Ok(call_tool(&params, client, send)),
         _ => Err(json!({ "code": -32601, "message": format!("method not found: {method}") })),
     };
     // A message without an id is a notification: nothing to send back.
@@ -225,21 +306,25 @@ fn handle(message: &Value, client: &mut String) -> Option<Value> {
 
 pub fn serve() -> io::Result<()> {
     let mut client = "mcp-client".to_string();
-    let mut out = io::stdout().lock();
+    // Replies and progress notifications share stdout, one line at a time.
+    let out = Mutex::new(io::stdout());
+    let send = |message: Value| {
+        let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = writeln!(out, "{message}").and_then(|()| out.flush());
+    };
     for line in io::stdin().lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle(&message, &mut client),
+            Ok(message) => handle(&message, &mut client, &send),
             Err(_) => Some(json!({
                 "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "parse error" }
             })),
         };
         if let Some(reply) = reply {
-            writeln!(out, "{reply}")?;
-            out.flush()?;
+            send(reply);
         }
     }
     Ok(())
@@ -257,6 +342,7 @@ mod tests {
                 "protocolVersion": "2025-03-26", "clientInfo": {"name": "claude-desktop\u{7}", "version": "1"}
             }}),
             &mut client,
+            &|_| {},
         )
         .unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
@@ -265,16 +351,17 @@ mod tests {
         let unknown = handle(
             &json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}}),
             &mut client,
+            &|_| {},
         )
         .unwrap();
         assert_eq!(unknown["result"]["protocolVersion"], PROTOCOL_VERSIONS[0]);
 
-        assert!(handle(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), &mut client).is_none());
-        let list = handle(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}), &mut client).unwrap();
+        assert!(handle(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), &mut client, &|_| {}).is_none());
+        let list = handle(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}), &mut client, &|_| {}).unwrap();
         let names: Vec<&str> =
             list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["list_secrets", "run_with_secrets", "fill_login"], "no tool reads a value");
-        let missing = handle(&json!({"jsonrpc": "2.0", "id": 4, "method": "resources/list"}), &mut client).unwrap();
+        let missing = handle(&json!({"jsonrpc": "2.0", "id": 4, "method": "resources/list"}), &mut client, &|_| {}).unwrap();
         assert_eq!(missing["error"]["code"], -32601);
     }
 
@@ -289,6 +376,7 @@ mod tests {
         assert!(args.contains(&"--reason=list PRs".to_string()));
         assert!(args.contains(&"--agent=cursor".to_string()));
         assert!(args.contains(&"--timeout=30".to_string()));
+        assert!(args.contains(&"--wait=3600".to_string()), "a phone may take a while to reach");
         assert_eq!(&args[args.len() - 4..], ["--", "gh", "pr", "list"]);
 
         for bad in [
@@ -320,12 +408,14 @@ mod tests {
         let reply = handle(
             &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "read_secret", "arguments": {}}}),
             &mut client,
+            &|_| {},
         )
         .unwrap();
         assert_eq!(reply["result"]["isError"], true);
         let reply = handle(
             &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "run_with_secrets", "arguments": {"command": ["ls"]}}}),
             &mut client,
+            &|_| {},
         )
         .unwrap();
         assert_eq!(reply["result"]["isError"], true);

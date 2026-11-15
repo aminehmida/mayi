@@ -100,7 +100,10 @@ class ControllerTest {
         val one = mayi("run", "-s", "L1", "-r", "kotlin", "--", "sh", "-c", "echo \$L1")
         assertEquals("[masked]\n", one.out)
         eventually("the notice to clear") { controller.state.notices.isEmpty() }
-        assertTrue(controller.state.log.any { it.event == "request" && it.remote && it.requester.startsWith("vm (") })
+        // The log is reloaded just after the notice goes.
+        eventually("the request to be logged") {
+            controller.state.log.any { it.event == "request" && it.remote && it.requester.startsWith("vm (") }
+        }
 
         // Level 3 waits for an answer from the screen.
         val answerer = Thread {
@@ -193,6 +196,11 @@ class ControllerTest {
         assertEquals(listOf("gh *"), edited.allow)
         assertEquals(60uL, edited.maxGrantSecs)
         assertTrue(!phone.vaultIsEmpty)
+        assertEquals("only on this phone", 1u, edited.copies)
+
+        // Its owner can see the value; that is logged, without the value.
+        assertEquals("abc", phone.reveal("TOKEN").getOrThrow().fields.single().value)
+        assertEquals("view", phone.state.log.last().event)
 
         // Pairing a machine from the phone.
         val token = phone.startPairing(60u).getOrThrow()
@@ -204,12 +212,14 @@ class ControllerTest {
         val otherKeys = TestKeys()
         joinVault(File(dir, "other.db").path, "other phone", otherKeys, invitation)
         eventually("the device to show") { phone.state.lastDeviceAdded == "other phone" }
+        eventually("a second copy") { phone.state.secrets.single().copies == 2u }
 
         // A recovery key, and removing a device with the secrets to rotate.
         assertTrue(phone.createRecoveryKey().getOrThrow().startsWith("mayi-recovery1."))
         val other = phone.state.devices.first { it.name == "other phone" }
         assertEquals(listOf("TOKEN"), phone.removeDevice(other.id).getOrThrow())
         assertTrue(phone.state.devices.first { it.name == "other phone" }.removed)
+        assertEquals("one copy again", 1u, phone.state.secrets.single().copies)
     }
 
     @Test

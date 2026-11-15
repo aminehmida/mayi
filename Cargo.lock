@@ -796,6 +796,7 @@ dependencies = [
  "clap",
  "hex",
  "libc",
+ "mayi-core",
  "mayi-proto",
  "serde",
  "serde_json",
@@ -853,6 +854,7 @@ name = "mayi-proto"
 version = "0.1.0-alpha.3"
 dependencies = [
  "base64",
+ "curve25519-dalek",
  "hex",
  "rand_core 0.6.4",
  "serde",

@@ -13,9 +13,7 @@ use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 use crate::cdp::{self, Endpoint, Session, Tab};
-use crate::{
-    open_channel, replies, requester_identity, Channel, Failure, EXIT_DENIED, EXIT_TIMEOUT, EXIT_UNAVAILABLE, EXIT_USAGE,
-};
+use crate::{reach, replies, requester_identity, Channel, Failure, Patience, EXIT_DENIED, EXIT_UNAVAILABLE, EXIT_USAGE};
 
 /// The page cannot be filled: no sign-in field, the wrong site, a form Mayi
 /// refuses, or a page that changed under it.
@@ -28,7 +26,7 @@ pub struct FillArgs {
     pub reason: String,
     pub agent: Option<String>,
     pub session: Option<String>,
-    pub timeout: u64,
+    pub patience: Patience,
     pub remote: bool,
     pub browser: Option<String>,
     pub tab: Option<String>,
@@ -222,15 +220,17 @@ fn press_enter(session: &mut Session) -> Result<(), String> {
 }
 
 pub fn fill(args: FillArgs) -> Result<u8, Failure> {
-    let Channel { reader, mut writer } = open_channel(args.remote).map_err(|e| (EXIT_UNAVAILABLE, e))?;
-    let replies = replies(reader);
-    let lost = |e: std::io::Error| (EXIT_UNAVAILABLE, format!("vault device connection lost: {e}"));
-
-    write_frame(&mut writer, &ClientMsg::List).map_err(lost)?;
-    let login = match replies.recv_timeout(Duration::from_secs(10)) {
-        Ok(ServerMsg::Secrets { secrets }) => secrets.into_iter().find(|s| s.name == args.login),
-        Ok(ServerMsg::Error { message }) => return Err((EXIT_UNAVAILABLE, message)),
-        _ => return Err((EXIT_UNAVAILABLE, "no usable reply from the vault device".into())),
+    // Any device can say what the login is for; the sign-in itself is
+    // asked of all of them below.
+    let login = {
+        let Channel { reader, mut writer } = reach::any(args.remote, args.patience.wait)?;
+        write_frame(&mut writer, &ClientMsg::List)
+            .map_err(|e| (EXIT_UNAVAILABLE, format!("vault device connection lost: {e}")))?;
+        match replies(reader).recv_timeout(Duration::from_secs(10)) {
+            Ok(ServerMsg::Secrets { secrets }) => secrets.into_iter().find(|s| s.name == args.login),
+            Ok(ServerMsg::Error { message }) => return Err((EXIT_UNAVAILABLE, message)),
+            _ => return Err((EXIT_UNAVAILABLE, "no usable reply from the vault device".into())),
+        }
     };
     let login = login.ok_or((EXIT_USAGE, format!("no secret named {} (see `mayi list`)", args.login)))?;
     if !login.login {
@@ -303,20 +303,12 @@ pub fn fill(args: FillArgs) -> Result<u8, Failure> {
         host: crate::hostname(),
         site: Some(origin.to_string()),
     };
-    write_frame(&mut writer, &ClientMsg::Run(request)).map_err(lost)?;
-    let values: Zeroizing<Vec<(String, Zeroizing<String>)>> = match replies.recv_timeout(Duration::from_secs(args.timeout)) {
-        Ok(ServerMsg::Released { env, .. }) => {
-            Zeroizing::new(env.into_iter().map(|(k, v)| (k, Zeroizing::new(v))).collect())
-        }
-        Ok(ServerMsg::Denied { reason }) => return Err((EXIT_DENIED, format!("denied: {reason}"))),
-        Ok(ServerMsg::Error { message }) => return Err((EXIT_UNAVAILABLE, message)),
-        Ok(_) => return Err((EXIT_UNAVAILABLE, "unexpected reply from the vault device".into())),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            return Err((EXIT_TIMEOUT, format!("no decision from the vault device within {}s", args.timeout)))
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            return Err((EXIT_UNAVAILABLE, "the vault device closed the connection".into()))
-        }
+    let reach::Answer { reply, replies, mut writer } =
+        reach::ask(&request, args.remote, args.patience.wait, args.patience.timeout)?;
+    let values: Zeroizing<Vec<(String, Zeroizing<String>)>> = match reply {
+        ServerMsg::Released { env, .. } => Zeroizing::new(env.into_iter().map(|(k, v)| (k, Zeroizing::new(v))).collect()),
+        ServerMsg::Denied { reason } => return Err((EXIT_DENIED, format!("denied: {reason}"))),
+        _ => return Err((EXIT_UNAVAILABLE, "unexpected reply from the vault device".into())),
     };
 
     let password_len = values.iter().find(|(name, _)| name == FIELD_PASSWORD).map(|(_, v)| v.chars().count());

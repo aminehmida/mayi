@@ -17,6 +17,7 @@ Requester to device:
 | `done` | `exit` | The command of a released run ended. |
 | `pair` | `name` | Enrol this machine. Only valid in a pairing tunnel. |
 | `peers` | | Ask which devices hold the vault and where they are. |
+| `enrol_local` | `name`, `public` | Enrol this machine's tunnel key as a requester. Only valid on the local socket. |
 
 Device to requester:
 
@@ -27,7 +28,7 @@ Device to requester:
 | `secrets` | `secrets` | Reply to `list`: name, level, field names, and for a login `login: true` and its `sites`. Never contains a value. |
 | `stop` | | The user pressed Stop: kill the command. |
 | `paired` | `device` | Pairing succeeded; `device` is the vault device's name. |
-| `peers` | `devices` | Each device's name, tunnel key, port, addresses and optional wake-up address. |
+| `peers` | `devices`, `sender`, `sender_active` | Each device's name, tunnel key, port and addresses; the replying device's own tunnel key; and whether its owner is using it right now. |
 | `error` | `message` | The request could not be handled. |
 
 A connection carries at most one `run`. After `released`, the requester keeps
@@ -154,23 +155,50 @@ A vault can live on more than one device. There is no server between them.
 
 ### Finding devices
 
-Each device publishes, in its own record in the vault, its tunnel key, port,
-network addresses and (for a phone) a wake-up address. Records sync like
-everything else, so every device knows where the others were last seen.
+Each device publishes, in its own record in the vault, its tunnel key, port
+and network addresses. Records sync like everything else, so every device
+knows where the others were last seen.
 
 A machine asks the device it reaches for `peers` at the start of every
 connection and stores the answer, so it learns about devices added after it
 was paired, new addresses, and removals. A list that does not include its
 sender is ignored.
 
-### Waking a phone
+### Reaching devices
 
-A phone cannot keep a port open while it sleeps. If a machine cannot connect
-to a device that has a wake-up address `{url, id}`, it sends
-`POST url` with `{"id": id}` and retries the connection for up to 20 seconds.
-The gateway behind the URL (`services/wake`) sends the phone a push with no
-content; the phone starts listening, and the machine connects to it directly.
-The gateway learns only that a device was woken.
+There is no push service. A phone keeps its port open while it sleeps,
+through a foreground service that Android lets keep the network, and is
+otherwise reached when it comes back. A request goes to every device of the
+vault the requester can reach, each over its own connection:
+
+1. The requester connects to the device on its own machine, if any, and to
+   every paired device, in parallel. A device it cannot reach is tried again
+   every 5 seconds for the first minute, then every 15, until the request
+   is decided or `wait` runs out (1 hour by default, 10 minutes for a sign-in).
+2. Once the devices that answer quickly have answered (up to 1 second after
+   the first), it chooses whom to ask first: the devices whose `peers` reply
+   says `sender_active`; otherwise the device on its own machine; otherwise
+   the one it reached most recently. It sends them the `run`.
+3. The others get the `run` 30 seconds later if a device in use was asked
+   first, otherwise 2 seconds later: long enough for a release that needs no
+   answer, so it does not happen on two devices. A device that comes online
+   later is asked under the same rule, and at once if its owner is using it.
+4. The wait for a decision (`timeout`, 15 minutes by default) starts when the
+   first `run` is sent. The first `released` or `denied` wins; the requester
+   closes every other connection, which takes their prompts down. An `error`
+   takes only that device out of the search. A device that closes its
+   connection before deciding is tried again.
+
+### The requester on a vault device's machine
+
+A requester that finds a vault device on its own machine asks it for `peers`
+over the socket. If the vault has other devices and the requester knows none
+of them, it sends `enrol_local` with its tunnel key: the device enrols it as a
+requester marked as that device's machine, syncs, and replies `paired`. From
+then on requests made on that machine also reach the other devices, as
+from any paired machine (so at least at level 2 there). The device refuses
+`enrol_local` over a tunnel, and when its owner has turned it off; turning it
+off revokes the requesters it enrolled this way.
 
 ### Enrolling a device (mode 3)
 
@@ -238,6 +266,12 @@ item at the same stamp) lacks some wraps. On receipt:
 
 Deletions are records too (tombstones), so they propagate. The audit log and
 each device's tunnel key are not synced.
+
+After a sync, each side records, for that device, the stamp of every item it
+now holds. A device counts an item's copies as itself, the device that wrote
+its current version, and every device recorded at that stamp, removed
+devices excluded. The apps mark an item with one copy: it is lost with the
+device it is on.
 
 Removing a device marks its record removed: other devices stop syncing with
 it, refuse its tunnel key, drop its level 4 wraps and wrap no new ones to it.

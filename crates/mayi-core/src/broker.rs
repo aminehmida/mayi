@@ -78,6 +78,16 @@ pub trait Ui: Send + Sync {
 
     /// The command of a released run ended, so its notice can go away.
     fn finished(&self, _run_id: u64, _exit: Option<i32>) {}
+
+    /// Whether the owner is using this device right now (screen unlocked,
+    /// recent input). Requesters ask the device in use first.
+    fn user_active(&self) -> bool {
+        false
+    }
+
+    /// Another machine just connected. A phone keeps itself awake for a
+    /// moment so the request can arrive before it sleeps again.
+    fn incoming(&self) {}
 }
 
 pub enum Outcome {

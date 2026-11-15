@@ -417,6 +417,8 @@ mod tests {
 
         p.phone.put(item("FROM_PHONE", Level::Biometric, "p")).unwrap();
         p.mac.put(item("TOKEN", Level::Log, "mac-edit")).unwrap();
+        // Edits are ordered by the millisecond: make this one later.
+        std::thread::sleep(std::time::Duration::from_millis(3));
         p.phone.put(item("TOKEN", Level::Log, "phone-edit")).unwrap();
         sync(&p.mac, &p.phone);
 
@@ -457,7 +459,7 @@ mod tests {
         let machine = p.mac.add_requester("vm", [4u8; 32]).unwrap();
         sync(&p.mac, &p.phone);
         p.phone.revoke_requester(&machine.id).unwrap();
-        p.phone.set_info(7462, vec!["10.0.0.9".into()], None).unwrap();
+        p.phone.set_info(7462, vec!["10.0.0.9".into()]).unwrap();
         sync(&p.mac, &p.phone);
         assert!(p.mac.requester_by_key(&[4u8; 32]).unwrap().is_none());
         let phone = p.mac.devices().unwrap().into_iter().find(|d| d.name == "phone").unwrap();

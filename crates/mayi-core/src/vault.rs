@@ -12,11 +12,12 @@
 //! Every synced record carries a [`Stamp`]. The higher stamp wins when two
 //! devices changed the same record (see `sync`).
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use mayi_proto::site::normalize_site;
-use mayi_proto::{Wake, FIELD_PASSWORD, FIELD_TOTP, FIELD_USERNAME};
+use mayi_proto::{FIELD_PASSWORD, FIELD_TOTP, FIELD_USERNAME};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -136,8 +137,6 @@ pub struct DeviceRecord {
     #[serde(default)]
     pub addresses: Vec<String>,
     #[serde(default)]
-    pub wake: Option<Wake>,
-    #[serde(default)]
     pub removed: bool,
     /// Not a device but the offline recovery key: it is given key wraps
     /// like a device, and never connects.
@@ -178,6 +177,10 @@ pub struct RequesterRecord {
     pub public: String,
     pub added_ms: u64,
     pub revoked: bool,
+    /// The device whose machine this is, when it enrolled itself through
+    /// that device's local socket rather than by pairing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_to: Option<String>,
 }
 
 impl RequesterRecord {
@@ -350,7 +353,6 @@ impl Vault {
             noise_public: String::new(),
             port: 0,
             addresses: vec![],
-            wake: None,
             removed: false,
             recovery: false,
             version: 0,
@@ -392,7 +394,6 @@ impl Vault {
             noise_public: hex::encode(noise.1),
             port: 0,
             addresses: vec![],
-            wake: None,
             removed: false,
             recovery: false,
             version: 0,
@@ -707,7 +708,7 @@ impl Vault {
         Ok(records)
     }
 
-    fn this_device(&self) -> Result<DeviceRecord> {
+    pub(crate) fn this_device(&self) -> Result<DeviceRecord> {
         self.devices()?
             .into_iter()
             .find(|d| d.id == self.device_id)
@@ -730,14 +731,13 @@ impl Vault {
 
     /// Publishes where this device can be reached. Returns whether anything
     /// changed (and so needs syncing).
-    pub fn set_info(&self, port: u16, addresses: Vec<String>, wake: Option<Wake>) -> Result<bool> {
+    pub fn set_info(&self, port: u16, addresses: Vec<String>) -> Result<bool> {
         let (_, noise_public) = self.noise_keypair()?;
         let mut record = self.this_device()?;
         let before = record.clone();
         record.noise_public = hex::encode(noise_public);
         record.port = port;
         record.addresses = addresses;
-        record.wake = wake;
         if record == before {
             return Ok(false);
         }
@@ -779,7 +779,6 @@ impl Vault {
             noise_public: new.noise_public.map(hex::encode).unwrap_or_default(),
             port: 0,
             addresses: vec![],
-            wake: None,
             removed: false,
             recovery: new.noise_public.is_none(),
             version: 0,
@@ -941,15 +940,41 @@ impl Vault {
     /// Enrols a machine by its static key. Pairing the same key again
     /// renames it and lifts a revocation.
     pub fn add_requester(&self, name: &str, public: [u8; 32]) -> Result<RequesterRecord> {
+        self.enrol_requester(name, public, None)
+    }
+
+    /// Enrols the machine this device runs on, so that requests made on it
+    /// can also reach the vault's other devices.
+    pub fn add_local_requester(&self, name: &str, public: [u8; 32]) -> Result<RequesterRecord> {
+        self.enrol_requester(name, public, Some(self.device_id.clone()))
+    }
+
+    fn enrol_requester(&self, name: &str, public: [u8; 32], local_to: Option<String>) -> Result<RequesterRecord> {
         let record = RequesterRecord {
             id: mayi_proto::noise::fingerprint(&public),
             name: name.to_string(),
             public: hex::encode(public),
             added_ms: now_ms(),
             revoked: false,
+            local_to,
         };
         self.put_requester(&record)?;
         Ok(record)
+    }
+
+    /// Revokes the machines that enrolled themselves through this device's
+    /// local socket. Returns how many there were.
+    pub fn revoke_local_requesters(&self) -> Result<usize> {
+        let mine: Vec<RequesterRecord> = self
+            .requesters()?
+            .into_iter()
+            .filter(|r| !r.revoked && r.local_to.as_deref() == Some(self.device_id.as_str()))
+            .collect();
+        for mut record in mine.clone() {
+            record.revoked = true;
+            self.put_requester(&record)?;
+        }
+        Ok(mine.len())
     }
 
     /// Every machine ever paired, including revoked ones, by name.
@@ -996,6 +1021,83 @@ impl Vault {
         released.sort();
         released.dedup();
         Ok(Some(released))
+    }
+
+    // --- Showing values to the owner and counting copies ---------------------
+
+    /// Decrypts a secret's values to show them to the owner in the app. The
+    /// app confirms the owner is present first; a level 4 secret also asks
+    /// for the biometric check that unlocks it, showing `prompt`. Recorded
+    /// in the audit log as a `view`.
+    pub fn view(&self, name: &str, prompt: &str) -> Result<(ItemMeta, SecretValues)> {
+        let meta = self.meta(name)?;
+        let values = self.reveal(&[&meta], prompt)?.pop().ok_or_else(|| Error::NotFound(name.to_string()))?;
+        self.audit(&AuditEntry {
+            ts_ms: now_ms(),
+            event: "view".into(),
+            outcome: "shown".into(),
+            requester: "local".into(),
+            secrets: vec![SecretUse { name: meta.name.clone(), level: meta.level as u8, via: "owner".into() }],
+            ..Default::default()
+        })?;
+        Ok((meta, values))
+    }
+
+    /// Records, after a sync with the device whose tunnel key is `peer`, that
+    /// it now holds every item at the version this device holds.
+    pub fn note_synced(&self, peer: &[u8; 32]) -> Result<()> {
+        let Some(device) = self.device_by_noise_key(peer)? else { return Ok(()) };
+        if device.id == self.device_id {
+            return Ok(());
+        }
+        let conn = self.conn();
+        let held: BTreeMap<String, Stamp> = conn
+            .prepare("SELECT id, version, author FROM items")?
+            .query_map([], |r| Ok((r.get(0)?, Stamp { version: r.get(1)?, author: r.get(2)? })))?
+            .collect::<rusqlite::Result<_>>()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO local (key, value) VALUES (?1, ?2)",
+            params![format!("holds:{}", device.id), serde_json::to_vec(&held)?],
+        )?;
+        Ok(())
+    }
+
+    /// How many devices hold each secret's current version, by item id, as
+    /// far as this device knows: itself, the device that wrote that version,
+    /// and every device it has synced with since. Removed devices and the
+    /// recovery key do not count. A secret with one copy is lost with its
+    /// device.
+    pub fn copies(&self) -> Result<HashMap<String, u32>> {
+        let others: Vec<String> = self
+            .devices()?
+            .into_iter()
+            .filter(|d| !d.removed && !d.recovery && d.id != self.device_id)
+            .map(|d| d.id)
+            .collect();
+        let conn = self.conn();
+        let mut holds: HashMap<&str, BTreeMap<String, Stamp>> = HashMap::new();
+        for id in &others {
+            let stored: Option<Vec<u8>> = conn
+                .query_row("SELECT value FROM local WHERE key = ?1", [format!("holds:{id}")], |r| r.get(0))
+                .optional()?;
+            if let Some(bytes) = stored {
+                holds.insert(id, serde_json::from_slice(&bytes).unwrap_or_default());
+            }
+        }
+        let items: Vec<(String, Stamp)> = conn
+            .prepare("SELECT id, version, author FROM items WHERE deleted = 0")?
+            .query_map([], |r| Ok((r.get(0)?, Stamp { version: r.get(1)?, author: r.get(2)? })))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(items
+            .into_iter()
+            .map(|(id, stamp)| {
+                let elsewhere = others
+                    .iter()
+                    .filter(|d| **d == stamp.author || holds.get(d.as_str()).and_then(|h| h.get(&id)) == Some(&stamp))
+                    .count();
+                (id, 1 + elsewhere as u32)
+            })
+            .collect())
     }
 
     // --- Audit log ---------------------------------------------------------
@@ -1283,13 +1385,23 @@ mod tests {
     fn device_info_is_published_once() {
         let dir = tempfile::tempdir().unwrap();
         let vault = vault(&dir);
-        assert!(vault.set_info(7462, vec!["10.0.0.2".into()], None).unwrap());
-        assert!(!vault.set_info(7462, vec!["10.0.0.2".into()], None).unwrap(), "unchanged");
+        assert!(vault.set_info(7462, vec!["10.0.0.2".into()]).unwrap());
+        assert!(!vault.set_info(7462, vec!["10.0.0.2".into()]).unwrap(), "unchanged");
         let me = &vault.devices().unwrap()[0];
         assert_eq!((me.port, me.addresses.as_slice()), (7462, &["10.0.0.2".to_string()][..]));
         let (_, public) = vault.noise_keypair().unwrap();
         assert_eq!(vault.device_by_noise_key(&public).unwrap().unwrap().id, vault.device_id());
         assert!(vault.remove_device(vault.device_id()).is_err());
+    }
+
+    /// Device records written when phones still had a wake-up address.
+    #[test]
+    fn device_records_with_a_wake_up_address_still_load() {
+        let old = r#"{"name":"Pixel","device_pub":"04","biometric_pub":"04","noise_public":"ab",
+            "port":7462,"addresses":["100.64.0.2"],"wake":{"url":"https://w.example/wake","id":"x"},
+            "removed":false,"recovery":false}"#;
+        let record: DeviceRecord = serde_json::from_str(old).unwrap();
+        assert_eq!((record.name.as_str(), record.port), ("Pixel", 7462));
     }
 
     #[test]

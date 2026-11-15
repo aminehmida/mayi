@@ -146,10 +146,10 @@ import Testing
 @Suite struct SecretDraftTests {
     let stored = SecretRecord(
         name: "DB", level: 4, fields: ["user", "password"], allow: ["psql *"], maxGrantSecs: 600, version: 1,
-        login: false, sites: [])
+        login: false, sites: [], copies: 1)
     let storedLogin = SecretRecord(
         name: "github", level: 3, fields: ["password", "totp", "username"], allow: [], maxGrantSecs: 600, version: 1,
-        login: true, sites: ["github.com"])
+        login: true, sites: ["github.com"], copies: 2)
 
     @Test func newSecretNeedsNameAndValues() {
         var draft = SecretDraft()
@@ -232,5 +232,45 @@ import Testing
         #expect(
             draft.change(existing: storedLogin)
                 == .failure("Changing the level re-encrypts the login, so enter its password again."))
+    }
+
+    @Test func shownValuesSavedUnchangedChangeOnlyRules() {
+        var draft = SecretDraft(editing: stored)
+        draft.show(RevealedSecret(
+            fields: [RevealedField(name: "user", value: "admin"), RevealedField(name: "password", value: "pw")],
+            code: nil, codeValidSecs: 0))
+        #expect(draft.fields.map(\.value) == ["admin", "pw"])
+        draft.allowText = "psql *\npg_dump *"
+        #expect(
+            draft.change(existing: stored)
+                == .success(.rules(name: "DB", allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, sites: [])))
+        // Shown values make a level change possible without typing them again.
+        draft.level = 3
+        #expect(
+            draft.change(existing: stored)
+                == .success(
+                    .put(
+                        name: "DB", level: 3, values: ["user": "admin", "password": "pw"],
+                        allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, login: false, sites: [])))
+    }
+
+    @Test func aShownLoginFillsItsFields() {
+        var draft = SecretDraft(editing: storedLogin)
+        draft.show(RevealedSecret(
+            fields: [
+                RevealedField(name: "password", value: "pw"), RevealedField(name: "totp", value: "JBSWY3DPEHPK3PXP"),
+                RevealedField(name: "username", value: "amine"),
+            ],
+            code: "123456", codeValidSecs: 12))
+        #expect((draft.username, draft.password, draft.twoFactorKey) == ("amine", "pw", "JBSWY3DPEHPK3PXP"))
+        #expect(
+            draft.change(existing: storedLogin)
+                == .success(.rules(name: "github", allow: [], maxGrantSecs: 600, sites: ["github.com"])))
+        draft.password = "new"
+        guard case .success(.put(_, _, let values, _, _, _, _)) = draft.change(existing: storedLogin) else {
+            Issue.record("expected a put")
+            return
+        }
+        #expect(values == ["username": "amine", "password": "new", "totp": "JBSWY3DPEHPK3PXP"])
     }
 }

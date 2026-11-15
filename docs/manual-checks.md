@@ -81,23 +81,11 @@ An emulator has no secure hardware and never sleeps, so these remain:
 - [ ] After adding or removing a fingerprint on the phone, level 4 secrets
       can no longer be unlocked on it (by design).
 - [ ] The phone still answers after several minutes with the screen off.
-      Android's battery saving may stop it without the wake-up push.
+      (See "Reaching your devices without Google" below.)
 - [ ] The emulator, its Android 15 image and the virtual device `mayi` take
       about 6 GB. Remove them when no longer needed with
       `sdkmanager --uninstall emulator "system-images;android-35;google_apis;arm64-v8a"`
       and by deleting `~/.android/avd/mayi.avd` and `~/.android/avd/mayi.ini`.
-
-### Wake-up push
-
-- [ ] Follow `services/wake/README.md`: Firebase project, service account,
-      KV namespace, deploy. This needs your accounts.
-- [ ] Build the app with `-Pmayi.wakeUrl=…` and `google-services.json`; the
-      Mac's Devices tab should then show the phone, and `mayi devices` on a
-      paired machine should say "can be woken".
-- [ ] With the phone asleep, a request from a machine wakes it and succeeds
-      within about 20 seconds.
-- [ ] The requester calls the gateway with `curl`, so `curl` must exist on
-      machines that should be able to wake a phone.
 
 ## Agents, recovery and revocation (milestone 5)
 
@@ -214,6 +202,52 @@ real Secure Enclave). Still to do by hand:
       next commands, and the prompt names the session `claude (pid …)`.
 - [ ] On the phone: restart it and, without opening Mayi, use a paired
       machine; the QR codes it shows scan from another phone.
+
+## Reaching your devices without Google
+
+Automated tests run the real `mayi` against two vault devices: a request
+waits for a device that comes online later, gives up after `--wait` naming
+each device and when it was last reached, asks the device in use first and
+the other only after 30 seconds, takes the first answer and takes the other
+prompt down, times out from when a device had the request, and, from a
+machine with a vault device, pairs itself through the socket and reaches the
+other device. An MCP call reports what it waits for as progress.
+
+On the emulator: the APK holds no Firebase, Play services or ML Kit code;
+setup asks to run in the background and the banner offers it until allowed;
+in forced deep Doze with the screen off a request from this Mac reached the
+phone, raised the notification, and was approved; it also reached it without
+the battery exemption (stock Android keeps a foreground service's network);
+the restart check brought back a stopped service from the background; each
+connection holds the phone awake for 30 seconds; the camera scanner opens
+(decoding is tested on generated codes). Still to do by hand:
+
+- [ ] Real phone over Tailscale, screen off for an hour or more: a request
+      from a machine still notifies, and the approval goes through.
+- [ ] Scan a join code or invitation with the new scanner on a real phone.
+- [ ] After a day, Mayi's battery use in Settings, Battery is negligible.
+- [ ] On a Samsung or Xiaomi phone, if you have one: with Unrestricted set
+      and the maker's own setting from dontkillmyapp.com, Mayi keeps serving.
+- [ ] An agent on the MacBook while you are away with the phone: the phone
+      asks; while you are typing on the Mac, only the Mac asks.
+- [ ] In Claude Code, a long `mayi run` started in the background with a
+      75-minute timeout wakes the agent when you answer.
+
+## Viewing secrets and single copies
+
+Automated tests cover the copy count (one copy until a sync, two after,
+back to one when the other device is removed, known on both sides), showing
+values only after the owner confirms, logging each view without the value,
+and saving shown values unchanged as a rules-only change. On the emulator the
+dot, the fingerprint prompt, the shown value with its copy button, and the
+"You viewed" entry in Activity were checked. Still to do by hand:
+
+- [ ] On the MacBook: Show Values asks for Touch ID (or your password) for a
+      level 1 to 3 secret, and only the Secure Enclave prompt for level 4.
+- [ ] A copied value is gone from the clipboard a minute later, on the Mac
+      and on a real phone.
+- [ ] Add a secret on the Mac: its orange dot goes once the phone has synced,
+      and the phone shows no dot for it.
 
 ## Decisions waiting for you
 

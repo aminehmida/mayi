@@ -82,6 +82,13 @@ public struct MachinesView: View {
         }
     }
 
+    private static func detail(_ machine: MachineRecord) -> String {
+        let key = "key \(machine.id.prefix(8))"
+        // A machine that runs a vault device and paired itself through it.
+        if let device = machine.runsDevice { return "Agents on \(device), \(key)" }
+        return "Paired \(date.string(from: Date(timeIntervalSince1970: Double(machine.addedMs) / 1000))), \(key)"
+    }
+
     public var body: some View {
         List(selection: $selection) {
             ForEach(model.machines, id: \.id) { machine in
@@ -91,7 +98,7 @@ public struct MachinesView: View {
                         .frame(width: 22)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(machine.name)
-                        Text("Paired \(Self.date.string(from: Date(timeIntervalSince1970: Double(machine.addedMs) / 1000))), key \(machine.id.prefix(8))")
+                        Text(Self.detail(machine))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }

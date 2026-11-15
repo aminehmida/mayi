@@ -3,10 +3,6 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// Wake-up pushes need your own Firebase project: drop its google-services.json
-// next to this file and set mayi.wakeUrl to your deployed gateway.
-val wakeUrl = providers.gradleProperty("mayi.wakeUrl").orNull ?: ""
-
 // Release signing comes from the environment, so the key never enters the
 // repository: MAYI_KEYSTORE (path), MAYI_KEYSTORE_PASSWORD, MAYI_KEY_ALIAS.
 // scripts/release.sh sets them. Every release must use the same key, or
@@ -24,7 +20,6 @@ android {
         targetSdk = 36
         versionCode = 3
         versionName = "0.1.0-alpha.3"
-        buildConfigField("String", "WAKE_URL", "\"$wakeUrl\"")
         // The ABIs build-core.sh builds the Rust core for. Without this the APK
         // would claim every ABI JNA ships, and crash on the others.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
@@ -78,11 +73,14 @@ dependencies {
     implementation("androidx.biometric:biometric:1.1.0")
     // The Rust core's bindings call it through JNA.
     implementation("net.java.dev.jna:jna:5.17.0@aar")
-    // The QR scanner: Google's code scanner UI, which needs no camera permission.
-    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
-    // Draws the QR codes this phone shows: invitations, join codes.
+    // The QR scanner: the camera through CameraX, read by ZXing. No Google
+    // Play services, so it works on phones without them.
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
+    // Draws the QR codes this phone shows (invitations, join codes) and reads
+    // the ones it scans.
     implementation("com.google.zxing:core:3.5.3")
-    implementation("com.google.firebase:firebase-messaging:24.1.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("net.java.dev.jna:jna:5.17.0")

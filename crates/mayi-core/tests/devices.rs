@@ -4,6 +4,7 @@
 
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -23,6 +24,7 @@ use zeroize::Zeroizing;
 struct CountingUi {
     added: AtomicUsize,
     synced: AtomicUsize,
+    active: AtomicBool,
 }
 
 impl Ui for CountingUi {
@@ -35,6 +37,9 @@ impl Ui for CountingUi {
     }
     fn synced(&self, changed: usize) {
         self.synced.fetch_add(changed, Ordering::SeqCst);
+    }
+    fn user_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
     }
 }
 
@@ -49,7 +54,7 @@ fn serve(vault: Vault) -> Device {
     let server = Server::new(Broker::new(vault, ui.clone(), Rules::default()));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    server.announce(addr.port(), vec!["127.0.0.1".into()], None).unwrap();
+    server.announce(addr.port(), vec!["127.0.0.1".into()]).unwrap();
     thread::spawn({
         let server = server.clone();
         move || server.serve_tcp(listener)
@@ -143,11 +148,13 @@ fn a_second_device_joins_syncs_and_serves_the_same_machines() {
     assert!(phone.server.broker().vault().meta("FROM_MAC").is_ok());
 
     // The machine paired with the Mac learns about the phone and can use it.
-    let Some(ServerMsg::Peers { devices }) =
+    let Some(ServerMsg::Peers { devices, sender, sender_active }) =
         request(mac.addr, &machine_key, &machine_token.device_public, &ClientMsg::Peers)
     else {
         panic!("no peer list")
     };
+    assert_eq!(sender, Some(hex::encode(machine_token.device_public)), "the list says who sent it");
+    assert!(!sender_active);
     assert_eq!(devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["mac", "phone"]);
     let phone_peer = &devices[1];
     assert_eq!(phone_peer.public_key, hex::encode(phone_public));
@@ -243,4 +250,131 @@ fn a_join_code_can_be_cancelled_and_expires() {
     let outcome = expired.wait(&dir.path().join("b.db"), keys(), "b", &AtomicBool::new(false)).map(|_| ());
     assert_eq!(outcome.unwrap_err().to_string(), "vault: the code expired");
     assert!(!dir.path().join("b.db").exists());
+}
+
+/// Sends one message over a device's local socket and reads the reply.
+fn local(socket: &std::path::Path, msg: &ClientMsg) -> Option<ServerMsg> {
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write_frame(&mut stream, msg).unwrap();
+    read_frame(&mut stream).unwrap()
+}
+
+/// `mayi` on a Mac with the app pairs itself through the app's socket, so its
+/// requests can also go to the phone; the switch on the Mac undoes it.
+#[test]
+fn the_machine_a_device_runs_on_enrols_itself_through_its_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let mac_vault =
+        Vault::create(&dir.path().join("mac.db"), Arc::new(SoftwareKeys::generate(|_| true)), "mac").unwrap();
+    mac_vault.put(item("L1", Level::Log)).unwrap();
+    let (_, mac_public) = mac_vault.noise_keypair().unwrap();
+    let mac = serve(mac_vault);
+    let socket = dir.path().join("mac.sock");
+    let listener = Server::bind(&socket).unwrap();
+    thread::spawn({
+        let server = mac.server.clone();
+        move || server.serve(listener)
+    });
+    let token = mac.server.start_enrolment(vec!["127.0.0.1".into()], mac.addr.port(), 60).unwrap();
+    let phone_vault =
+        join_vault(&dir.path().join("phone.db"), Arc::new(SoftwareKeys::generate(|_| true)), "phone", &token).unwrap();
+    let (_, phone_public) = phone_vault.noise_keypair().unwrap();
+    let phone = serve(phone_vault);
+    phone.server.sync_all().unwrap();
+
+    // The socket's list names the Mac, and says whether it is in use.
+    mac.ui.active.store(true, Ordering::SeqCst);
+    let Some(ServerMsg::Peers { devices, sender, sender_active }) = local(&socket, &ClientMsg::Peers) else {
+        panic!("no peer list")
+    };
+    assert_eq!(devices.len(), 2);
+    assert_eq!(sender, Some(hex::encode(mac_public)));
+    assert!(sender_active);
+
+    let (machine_key, machine_public) = noise::generate_keypair().unwrap();
+    let enrol = ClientMsg::EnrolLocal { name: "macbook".into(), public: hex::encode(machine_public) };
+    assert!(matches!(local(&socket, &enrol), Some(ServerMsg::Paired { device }) if device == "mac"));
+    let machines = mac.server.broker().vault().requesters().unwrap();
+    assert_eq!(machines[0].local_to.as_deref(), Some(mac.server.broker().vault().device_id()));
+
+    // Not over the network, even with a paired key.
+    match request(mac.addr, &machine_key, &mac_public, &enrol) {
+        Some(ServerMsg::Error { message }) => assert!(message.contains("local socket"), "{message}"),
+        other => panic!("unexpected reply: {other:?}"),
+    }
+
+    // Once synced, the phone takes requests from it.
+    mac.server.sync_all().unwrap();
+    let run = ClientMsg::Run(RunRequest {
+        bindings: vec![Binding { env: "T".into(), item: "L1".into(), field: "value".into() }],
+        argv: vec!["true".into()],
+        reason: "from the Mac".into(),
+        session: "s".into(),
+        ..Default::default()
+    });
+    assert!(matches!(request(phone.addr, &machine_key, &phone_public, &run), Some(ServerMsg::Released { .. })));
+
+    // Switched off on the Mac: revoked everywhere, and no new enrolment.
+    mac.server.set_local_enrol(false).unwrap();
+    mac.server.sync_all().unwrap();
+    assert!(matches!(request(phone.addr, &machine_key, &phone_public, &run), Some(ServerMsg::Error { .. })));
+    assert!(matches!(local(&socket, &enrol), Some(ServerMsg::Error { .. })));
+}
+
+/// Each device knows which secrets exist only on it: a new secret has one
+/// copy until a sync, and a removed device stops counting.
+#[test]
+fn secrets_with_one_copy_are_known_until_they_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let mac_vault =
+        Vault::create(&dir.path().join("mac.db"), Arc::new(SoftwareKeys::generate(|_| true)), "mac").unwrap();
+    mac_vault.put(item("OLD", Level::Log)).unwrap();
+    let copies = |vault: &Vault, name: &str| {
+        let id = vault.meta(name).unwrap().id;
+        vault.copies().unwrap()[&id]
+    };
+    assert_eq!(copies(&mac_vault, "OLD"), 1, "the only device");
+    let mac = serve(mac_vault);
+    let mac_vault = || mac.server.broker().vault();
+
+    let token = mac.server.start_enrolment(vec!["127.0.0.1".into()], mac.addr.port(), 60).unwrap();
+    let phone_vault =
+        join_vault(&dir.path().join("phone.db"), Arc::new(SoftwareKeys::generate(|_| true)), "phone", &token).unwrap();
+    let phone = serve(phone_vault);
+    let phone_vault = || phone.server.broker().vault();
+    // The Mac learns where the phone listens.
+    assert!(phone.server.sync_all().unwrap()[0].1.is_ok());
+    assert_eq!(copies(mac_vault(), "OLD"), 2, "the phone synced as it joined");
+    assert_eq!(copies(phone_vault(), "OLD"), 2, "the Mac wrote it");
+
+    mac_vault().put(item("NEW", Level::Log)).unwrap();
+    assert_eq!(copies(mac_vault(), "NEW"), 1, "not synced yet");
+    mac_vault().put(item("OLD", Level::Log)).unwrap();
+    assert_eq!(copies(mac_vault(), "OLD"), 1, "an edit is a new version, on this Mac only");
+    assert!(mac.server.sync_all().unwrap()[0].1.is_ok());
+    assert_eq!((copies(mac_vault(), "NEW"), copies(mac_vault(), "OLD")), (2, 2));
+
+    phone_vault().put(item("FROM_PHONE", Level::Log)).unwrap();
+    assert_eq!(copies(phone_vault(), "FROM_PHONE"), 1);
+    phone.server.sync_all().unwrap();
+    assert_eq!(copies(phone_vault(), "FROM_PHONE"), 2);
+    assert_eq!(copies(mac_vault(), "FROM_PHONE"), 2, "the side that was called knows too");
+
+    let phone_id = phone_vault().device_id().to_string();
+    mac_vault().remove_device(&phone_id).unwrap();
+    assert_eq!(copies(mac_vault(), "FROM_PHONE"), 1, "a removed device holds no copy that counts");
+}
+
+#[test]
+fn viewing_a_secret_is_logged_without_its_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::create(&dir.path().join("v.db"), Arc::new(SoftwareKeys::generate(|_| true)), "mac").unwrap();
+    vault.put(item("TOKEN", Level::Approve)).unwrap();
+    let (meta, values) = vault.view("TOKEN", "show TOKEN").unwrap();
+    assert_eq!(meta.name, "TOKEN");
+    assert_eq!(&**values.get("value").unwrap(), "TOKEN-value");
+    let entry = vault.audit_tail(1).unwrap().pop().unwrap();
+    assert_eq!((entry.event.as_str(), entry.secrets[0].name.as_str()), ("view", "TOKEN"));
+    assert!(!serde_json::to_string(&entry).unwrap().contains("TOKEN-value"));
 }

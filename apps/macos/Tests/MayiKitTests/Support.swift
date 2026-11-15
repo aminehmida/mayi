@@ -46,6 +46,8 @@ final class SilentUi: UiDelegate, @unchecked Sendable {
     func deviceAdded(name: String) {}
     func synced(changed: UInt64) {}
     func finished(runId: UInt64, exitCode: Int32?) {}
+    func userActive() -> Bool { false }
+    func incoming() {}
 }
 
 /// A scratch directory short enough for a unix socket path.

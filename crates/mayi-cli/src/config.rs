@@ -7,7 +7,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use mayi_proto::noise::{self, PrivateKey, PublicKey};
-use mayi_proto::{Peer, Wake};
+use mayi_proto::Peer;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -26,9 +26,6 @@ pub struct Device {
     pub public_key: String,
     pub port: u16,
     pub addresses: Vec<String>,
-    /// How to wake the device if it does not answer (a phone).
-    #[serde(default)]
-    pub wake: Option<Wake>,
     /// Groups the devices of one vault: the key of the device first paired with.
     #[serde(default)]
     pub vault: Option<String>,
@@ -37,6 +34,9 @@ pub struct Device {
     /// forwarded port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reached: Option<String>,
+    /// When this machine last reached the device, in seconds since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<u64>,
 }
 
 impl Device {
@@ -133,14 +133,20 @@ impl Config {
             // What worked before is kept: the announced addresses are only
             // the ones the device sees on its own network interfaces.
             reached: before.iter().find(|d| d.public_key == p.public_key).and_then(|d| d.reached.clone()),
+            seen: before.iter().find(|d| d.public_key == p.public_key).and_then(|d| d.seen),
             name: p.name,
             public_key: p.public_key,
             port: p.port,
             addresses: p.addresses,
-            wake: p.wake,
             vault: Some(vault.clone()),
         }));
         self.devices != before
+    }
+
+    /// Whether this machine already knows a device from this list, and so is
+    /// paired with its vault.
+    pub fn knows_any(&self, peers: &[Peer]) -> bool {
+        self.devices.iter().any(|d| peers.iter().any(|p| p.public_key == d.public_key))
     }
 
     /// Adds a device, replacing an earlier pairing with the same device.
@@ -160,14 +166,14 @@ mod tests {
             public_key: key.into(),
             port: 1,
             addresses: vec![],
-            wake: None,
             vault: vault.map(String::from),
             reached: None,
+            seen: None,
         }
     }
 
     fn peer(name: &str, key: &str) -> Peer {
-        Peer { name: name.into(), public_key: key.into(), port: 2, addresses: vec!["a".into()], wake: None }
+        Peer { name: name.into(), public_key: key.into(), port: 2, addresses: vec!["a".into()] }
     }
 
     #[test]

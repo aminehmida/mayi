@@ -222,6 +222,20 @@ public struct DevicesView: View {
                 .padding(.vertical, 4)
                 .tag(device.id)
             }
+            if model.hasOtherDevices {
+                Section {
+                    Toggle(isOn: Binding(get: { model.localEnrol }, set: { model.setLocalEnrol($0) })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Agents on this Mac can also ask your other devices")
+                            Text("When you are away from this Mac, your phone asks you instead. The device you are using is always asked first.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
         }
         .listStyle(.inset)
         .safeAreaInset(edge: .bottom, spacing: 0) {

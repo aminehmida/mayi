@@ -16,8 +16,9 @@ run commands on the owner's behalf.
 - **The command the owner approves.** Once a secret is released to a
   command, that command can do anything with it.
 
-Agents, the machines they run on, the network, and the wake-up gateway are
-not trusted with secret values.
+Agents, the machines they run on and the network are not trusted with
+secret values. No push service or other third party is involved: requests
+travel only between your machines and your devices.
 
 ## Threats and what happens
 
@@ -114,6 +115,18 @@ unlock level 4 with it: accepting the password was chosen over a level 4
 that a closed lid blocks. Macs set up before v0.1.0-alpha.3 keep a
 fingerprint-only key until they set up their vault again.
 
+### Someone at an unlocked device
+
+The apps show a secret's values only after the owner confirms: Touch ID or
+the login password on a Mac, a fingerprint on a phone. For level 4 that
+confirmation is the hardware unlock itself. Every view is written to the
+activity log, without the value.
+
+**Limits.** For levels 1 to 3 the confirmation is a policy check in the app,
+like pairing, not cryptography. A copied value is readable by other apps
+until it is cleared after a minute; it is marked so clipboard managers and
+Android's clipboard preview skip it.
+
 ### Theft of a device, or of a copy of the vault file
 
 - The file alone is useless: every value is sealed under keys that only a
@@ -131,6 +144,10 @@ at their source.
 
 ### Loss of every device
 
+Each device knows which secrets exist only on it (one copy) and marks them,
+so a secret added on one device and never synced is not lost unnoticed with
+it.
+
 The optional recovery key is an offline key that can open a copy of the vault
 file with no device and no fingerprint. It exists so that changed
 fingerprints, a dead Mac or a lost phone do not mean lost secrets.
@@ -140,14 +157,30 @@ a copy of the vault file reads everything. Replacing it stops the old key
 from receiving new level 4 secrets, but the old key still opens the vault key
 and therefore every secret below level 4, old and new.
 
-### The wake-up gateway
+### A phone that listens
 
-It stores a random id and a push token per phone, and sends pushes with no
-content. It never sees a request or a secret.
+A phone keeps its port open while it sleeps, so anyone on the same network or
+tailnet can connect to it. Without a paired machine's key or a device's key
+the handshake fails and nothing is learnt; each connection wakes the phone
+for up to 30 seconds, which costs a little battery.
 
-**Limits.** Anyone who learns a phone's wake id can wake it (rate-limited to
-once per 5 seconds), which costs battery and reveals nothing. The gateway's
-operator can see when a phone is being woken.
+### Agents on a vault device's machine
+
+`mayi` on a Mac with the app pairs that Mac with the vault through the app's
+local socket, without asking, so agents there can also reach the phone. Any
+process of the user can already make requests through that socket. The new
+part is a key file in `~/.config/mayi/requester.json` that also works from
+elsewhere on the network: a process that copies it can send requests to the
+other devices from another machine. Those requests are remote, so they are
+at least level 2 (the owner is notified and can stop them) and show the
+pairing's name. Turning off "Agents on this Mac can also ask your other
+devices" revokes it.
+
+### Waiting for a device
+
+A request can wait up to an hour for a device to come online. The reason it
+gives may be stale by then; it is shown as the agent stated it, like any
+claim, together with the time the prompt appeared.
 
 ### Website logins
 

@@ -65,12 +65,19 @@ import Testing
     @Test func editor() async throws {
         let stored = SecretRecord(
             name: "PROD_DB", level: 4, fields: ["password", "user"], allow: ["psql *", "pg_dump *"],
-            maxGrantSecs: 300, version: 2, login: false, sites: [])
+            maxGrantSecs: 300, version: 2, login: false, sites: [], copies: 1)
         try await snapshot(
             SecretEditor(
                 existing: stored, error: "Changing the level re-encrypts the secret, so enter its values again.",
                 onSave: { _ in nil }, onCancel: {}),
             name: "editor", dark: false)
+        var shown = SecretDraft(editing: stored)
+        shown.show(RevealedSecret(
+            fields: [RevealedField(name: "password", value: "s3cr3t-pa55"), RevealedField(name: "user", value: "app")],
+            code: nil, codeValidSecs: 0))
+        try await snapshot(
+            SecretEditor(existing: stored, draft: shown, onSave: { _ in nil }, onCancel: {}),
+            name: "editor-shown", dark: false)
     }
 
     @Test func pairing() async throws {

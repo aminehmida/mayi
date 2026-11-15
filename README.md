@@ -107,6 +107,12 @@ your login password for every unlock, so a closed lid does not block them.
 A Mac set up before v0.1.0-alpha.3 keeps its fingerprint-only key, which
 changed fingerprints make unusable, until its vault is set up again.
 
+To read a secret yourself, select it and choose Show Values: after Touch ID
+or your password, its values appear in the editor, where you can change them
+or copy one (the clipboard is cleared after a minute). Each view is listed in
+Activity. An orange dot next to a secret means it is only on this Mac: it
+gets a second copy when another of your devices syncs.
+
 Mayi lives in the menu bar, and in the Dock while one of its windows is
 open. Opening it from Finder or Spotlight shows its window, which helps when
 the notch hides the menu-bar icon. It starts at login; "Open at Login" in its
@@ -153,9 +159,13 @@ command it shows on the other machine (`mayi pair mayi1.…`). After that,
 `mayi run` and `mayi list` work there as they do locally, as long as it can
 reach the Mac on port 7462 over the local network or a VPN such as Tailscale.
 
-Requests from another machine are marked as such, level 1 secrets are raised
-to a notification, and a request that gets no decision within 120 seconds
-(`--timeout`) fails with exit code 75. Revoke a machine from the same tab.
+Requests from another machine are marked as such, and level 1 secrets are
+raised to a notification. Revoke a machine from the same tab.
+
+A request waits for you rather than failing at once: `mayi` keeps trying your
+devices for up to an hour (`--wait`), then gives you 15 minutes to answer
+(`--timeout`) once one of them shows the prompt. It fails with exit code 69 if
+no device could be reached, or 75 if nobody answered.
 
 ## More than one device
 
@@ -178,10 +188,22 @@ A Mac or phone that already started an empty vault of its own shows "Join
 Another Vault…" in Devices: Mayi sets the empty vault aside and restarts
 into setup.
 
-The phone app does what the Mac app does: add and edit secrets and logins,
+A request goes to all your devices that can be reached, and the first answer
+counts; the others take their prompt down. The device you are using is asked
+first (a Mac unlocked with recent input, or a phone unlocked with the screen
+on), and the others 30 seconds later, so you are not asked twice. An agent on
+a Mac with the app reaches your phone too: `mayi` there pairs the Mac with
+the vault the first time it needs to. Devices, "Agents on this Mac can also
+ask your other devices" turns that off.
+
+No push service is involved, Google's or anyone's: a machine connects to the
+phone directly, over the same network or [Tailscale](https://tailscale.com).
+
+The phone app does what the Mac app does: add, view and edit secrets and logins (values show after your fingerprint, and an orange dot marks a secret that is only on this phone),
 pair machines, add and remove devices, and make a recovery key. It starts
 serving again after the phone restarts, and warns when notifications are
-off, since requests in the background could not reach you.
+off or Android may stop it in the background, since requests could not reach
+you. It needs no Google services: the QR scanner uses the camera directly.
 
 The Android app is in `apps/android`:
 
@@ -190,8 +212,14 @@ apps/android/build-core.sh          # Rust core for Android + Kotlin bindings
 cd apps/android && ./gradlew assembleDebug
 ```
 
-A phone answers requests while it is awake. To have machines wake it, deploy
-the gateway in `services/wake` (it needs your own Firebase project).
+For requests to reach the phone while it sleeps:
+
+- Let Mayi run in the background. Setup asks; it is the phone's battery
+  setting "Unrestricted". Mayi only listens, so it costs almost no battery.
+  Some makers (Samsung, Xiaomi and others) stop apps anyway; the app links to
+  [dontkillmyapp.com](https://dontkillmyapp.com) for those.
+- Away from home, keep Tailscale on: in Android's VPN settings, turn on
+  Always-on VPN for Tailscale.
 
 ## For agents
 
@@ -247,7 +275,6 @@ target/debug/mayi-devd serve --listen 0.0.0.0:7462   # also accept paired machin
 - `crates/mayi-devd`: development vault device with terminal prompts
 - `apps/macos`: the Mac menu-bar app (SwiftPM)
 - `apps/android`: the Android app (Kotlin, Compose)
-- `services/wake`: the optional wake-up gateway (Cloudflare Worker)
 - `skill/mayi`: instructions that teach an agent to use `mayi`
 - `scripts/test-fill.py`: end-to-end test of `mayi fill` against a local test site and headless Chrome
 - `scripts/release.sh`, `scripts/publish.py`: build and publish a release

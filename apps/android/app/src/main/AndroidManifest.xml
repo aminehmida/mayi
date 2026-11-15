@@ -7,6 +7,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Asks to be left running while the phone sleeps, so requests reach it. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Stays awake for a moment when a machine connects. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Scans the QR codes other devices show. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
         android:name=".MayiApp"
@@ -47,13 +54,9 @@
             </intent-filter>
         </receiver>
 
-        <!-- Receives the empty wake-up push sent when a machine needs this device. -->
-        <service
-            android:name=".WakeService"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.google.firebase.MESSAGING_EVENT" />
-            </intent-filter>
-        </service>
+        <!-- Every 15 minutes: serves again if Android stopped the service. -->
+        <receiver
+            android:name=".RestartCheck"
+            android:exported="false" />
     </application>
 </manifest>

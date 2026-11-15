@@ -1,10 +1,14 @@
 package dev.mayi.android
 
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
+import android.os.PersistableBundle
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -15,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -30,6 +35,8 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
@@ -204,6 +211,36 @@ fun QrCode(text: String, size: Dp = 220.dp) {
 
 fun copyText(context: Context, label: String, text: String) {
     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(label, text))
+}
+
+/**
+ * Copies a secret's value, marked so the system does not show it in its
+ * clipboard preview, and clears it after a minute unless something else was
+ * copied since.
+ */
+fun copySecret(context: Context, text: String) {
+    val clipboard = context.getSystemService(ClipboardManager::class.java)
+    val label = "Mayi value"
+    val clip = ClipData.newPlainText(label, text)
+    clip.description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }
+    clipboard.setPrimaryClip(clip)
+    Handler(Looper.getMainLooper()).postDelayed({
+        // Unreadable when Mayi is in the background: cleared then too.
+        val current = clipboard.primaryClipDescription?.label
+        if (current == null || current == label) clipboard.clearPrimaryClip()
+    }, 60_000)
+}
+
+/** Amber: a secret that exists only on this phone. */
+val oneCopyColor = Color(0xFFF29900)
+
+/** Marks a secret that exists only on this phone, so it is lost if the phone is. */
+@Composable
+fun OneCopyDot() {
+    Box(
+        Modifier.size(8.dp).background(oneCopyColor, CircleShape)
+            .semantics { contentDescription = "Only on this phone" },
+    )
 }
 
 fun shareText(context: Context, text: String) {

@@ -1,6 +1,8 @@
 package dev.mayi.android
 
+import android.app.AlarmManager
 import android.app.Application
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,26 +11,21 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import com.google.firebase.FirebaseApp
-import com.google.firebase.messaging.FirebaseMessaging
-import com.google.firebase.messaging.FirebaseMessagingService
-import com.google.firebase.messaging.RemoteMessage
 import dev.mayi.ffi.JoinInvitation
-import dev.mayi.ffi.WakeInfo
 import dev.mayi.ffi.joinVault
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
-import org.json.JSONObject
 
 private const val CHANNEL_SERVICE = "service"
 private const val CHANNEL_REQUESTS = "requests"
@@ -38,8 +35,14 @@ private const val NOTE_ATTENTION = 2
 /** Port paired machines and other devices connect to. */
 private const val PORT: UShort = 7462u
 
+/** How often the restart check runs. */
+private const val RESTART_CHECK_MS = 15 * 60 * 1000L
+
+/** Makers whose battery savers are known to stop apps that Android itself keeps. */
+private val strictMakers = setOf("samsung", "xiaomi", "oneplus", "huawei", "honor", "oppo", "vivo", "realme", "meizu", "asus", "sony")
+
 class MayiApp : Application() {
-    val controller = MayiController()
+    val controller = MayiController(userActive = { userActive() }, onIncoming = { stayAwakeBriefly() })
 
     /** The activity on screen, if any: where a fingerprint prompt can be shown. */
     @Volatile
@@ -53,7 +56,6 @@ class MayiApp : Application() {
         KeystoreKeys(allowSoftwareKeys = BuildConfig.DEBUG && onEmulator, authenticate = ::authenticate)
     }
     private val vaultFile: File get() = File(filesDir, "vault.db")
-    private val prefs get() = getSharedPreferences("mayi", Context.MODE_PRIVATE)
 
     val hasVault: Boolean get() = vaultFile.exists()
 
@@ -64,6 +66,50 @@ class MayiApp : Application() {
     val biometricsReady: Boolean
         get() = BiometricManager.from(this).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
             BiometricManager.BIOMETRIC_SUCCESS
+
+    /**
+     * Whether Android leaves Mayi running while the phone sleeps (battery use
+     * "Unrestricted"). Without it, requests may not reach the phone, and the
+     * restart check cannot bring the service back.
+     */
+    val backgroundAllowed: Boolean
+        get() = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+
+    /** Shows Android's dialog that lets Mayi run in the background. */
+    fun askToRunInBackground(context: Context) {
+        context.startActivity(
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+    }
+
+    /** For phones whose maker stops apps anyway: the page that says what else to turn off. */
+    val makerHelpPage: String?
+        get() = Build.MANUFACTURER.lowercase().takeIf { it in strictMakers }?.let { "https://dontkillmyapp.com/$it" }
+
+    /** The phone is unlocked and its screen on: its owner is using it. */
+    private fun userActive(): Boolean =
+        getSystemService(PowerManager::class.java).isInteractive &&
+            !getSystemService(KeyguardManager::class.java).isKeyguardLocked
+
+    private val wakeLock by lazy {
+        getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "mayi:incoming")
+            .apply { setReferenceCounted(false) }
+    }
+
+    /** A machine connected: stay awake long enough for its request to arrive and be shown. */
+    private fun stayAwakeBriefly() = wakeLock.acquire(30_000)
+
+    /**
+     * Every 15 minutes, starts the service again if Android stopped it.
+     * Android allows that while Mayi may run in the background. Rescheduling
+     * replaces the earlier alarm.
+     */
+    fun scheduleRestartCheck() {
+        val check = PendingIntent.getBroadcast(
+            this, 0, Intent(this, RestartCheck::class.java), PendingIntent.FLAG_IMMUTABLE)
+        getSystemService(AlarmManager::class.java).setInexactRepeating(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + RESTART_CHECK_MS, RESTART_CHECK_MS, check)
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -81,12 +127,14 @@ class MayiApp : Application() {
         }
         // The service is not started here: the process may be starting in the
         // background, where Android refuses a foreground service. It is started
-        // by the screen, the boot receiver and the wake-up push instead.
+        // by the screen, the boot receiver and the restart check instead.
+        if (hasVault) scheduleRestartCheck()
     }
 
     /**
      * Keeps the vault serving, if there is one. Only allowed while the app is
-     * on screen, just after boot, or on a wake-up push; elsewhere it does nothing.
+     * on screen, just after boot, or while Mayi may run in the background;
+     * elsewhere it does nothing.
      */
     fun ensureServing() {
         if (!hasVault) return
@@ -108,17 +156,14 @@ class MayiApp : Application() {
             controller.open(vaultFile.path, defaultDeviceName, keys)
         }
         publish()
-        registerForWakeUps()
+        scheduleRestartCheck()
         null
     } catch (e: Exception) {
         MayiController.describe(e)
     }
 
     private fun publish() {
-        val wake = prefs.getString("wake_id", null)
-            ?.takeIf { BuildConfig.WAKE_URL.isNotEmpty() }
-            ?.let { WakeInfo("${BuildConfig.WAKE_URL}/wake", it) }
-        controller.listen(PORT, emptyList(), wake)
+        controller.listen(PORT)
         Thread { controller.sync() }.start()
     }
 
@@ -231,34 +276,6 @@ class MayiApp : Application() {
         .setContentIntent(openAppIntent())
         .setOngoing(true)
         .build()
-
-    // --- Wake-up pushes -------------------------------------------------------
-    // Optional: needs a Firebase project (google-services.json) and a deployed
-    // gateway (mayi.wakeUrl). Without them the phone answers only while awake.
-
-    private fun registerForWakeUps() {
-        if (BuildConfig.WAKE_URL.isEmpty() || FirebaseApp.getApps(this).isEmpty()) return
-        FirebaseMessaging.getInstance().token.addOnSuccessListener { registerWake(it) }
-    }
-
-    /** Exchanges the push token for a wake id that machines can use. */
-    fun registerWake(pushToken: String) {
-        if (BuildConfig.WAKE_URL.isEmpty() || prefs.getString("push_token", null) == pushToken) return
-        Thread {
-            try {
-                val connection = URL("${BuildConfig.WAKE_URL}/register").openConnection() as HttpURLConnection
-                connection.requestMethod = "POST"
-                connection.doOutput = true
-                connection.setRequestProperty("content-type", "application/json")
-                connection.outputStream.use { it.write(JSONObject().put("token", pushToken).toString().toByteArray()) }
-                val id = JSONObject(connection.inputStream.bufferedReader().readText()).getString("id")
-                prefs.edit().putString("push_token", pushToken).putString("wake_id", id).apply()
-                if (controller.device != null) publish()
-            } catch (e: Exception) {
-                // Tried again the next time the app starts.
-            }
-        }.start()
-    }
 }
 
 /** Keeps the process alive and the vault reachable while the phone is awake. */
@@ -281,13 +298,9 @@ class BootReceiver : BroadcastReceiver() {
     }
 }
 
-/** The empty wake-up push: all it has to do is bring the service up. */
-class WakeService : FirebaseMessagingService() {
-    override fun onMessageReceived(message: RemoteMessage) {
-        (application as MayiApp).ensureServing()
-    }
-
-    override fun onNewToken(token: String) {
-        (application as MayiApp).registerWake(token)
+/** Brings the service back if Android stopped it; see [MayiApp.scheduleRestartCheck]. */
+class RestartCheck : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        (context.applicationContext as MayiApp).ensureServing()
     }
 }

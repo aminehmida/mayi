@@ -62,6 +62,9 @@ pub struct Server {
     running: Mutex<HashMap<u64, RunConn>>,
     /// The pairing invitation currently open, if any.
     pairing: Mutex<Option<Pairing>>,
+    /// Whether a requester on this machine may enrol itself through the
+    /// local socket, to reach the vault's other devices too.
+    local_enrol: AtomicBool,
 }
 
 struct RunConn {
@@ -128,11 +131,48 @@ pub fn local_addresses() -> Vec<String> {
 
 impl Server {
     pub fn new(broker: Broker) -> Arc<Self> {
-        Arc::new(Self { broker, running: Mutex::default(), pairing: Mutex::default() })
+        Arc::new(Self {
+            broker,
+            running: Mutex::default(),
+            pairing: Mutex::default(),
+            local_enrol: AtomicBool::new(true),
+        })
     }
 
     pub fn broker(&self) -> &Broker {
         &self.broker
+    }
+
+    /// Lets requesters on this machine enrol themselves through the local
+    /// socket, or stops that and revokes the ones that did.
+    pub fn set_local_enrol(&self, allowed: bool) -> crate::Result<()> {
+        self.local_enrol.store(allowed, Ordering::SeqCst);
+        if !allowed && self.broker.vault().revoke_local_requesters()? > 0 {
+            // The other devices stop accepting it as soon as they hear.
+            self.sync_all()?;
+        }
+        Ok(())
+    }
+
+    fn enrol_local(&self, requester: &Requester, name: &str, public: &str) -> Result<String, String> {
+        if requester.remote {
+            return Err("a machine enrols itself only through the local socket".into());
+        }
+        if !self.local_enrol.load(Ordering::SeqCst) {
+            return Err("this device does not let requesters on its machine reach other devices".into());
+        }
+        let public: [u8; 32] = hex::decode(public)
+            .ok()
+            .and_then(|k| k.try_into().ok())
+            .ok_or("not a tunnel key")?;
+        let vault = self.broker.vault();
+        let known = vault.requester_by_key(&public).map_err(|e| e.to_string())?.is_some();
+        vault.add_local_requester(&clean_name(name), public).map_err(|e| e.to_string())?;
+        if !known {
+            // The other devices learn of the machine now, before it asks them.
+            let _ = self.sync_all();
+        }
+        Ok(vault.this_device().map_err(|e| e.to_string())?.name)
     }
 
     /// Revokes the session of a released run and tells its requester to kill
@@ -226,7 +266,6 @@ impl Server {
                 public_key: d.noise_public,
                 port: d.port,
                 addresses: d.addresses,
-                wake: d.wake,
             })
             .collect())
     }
@@ -239,6 +278,7 @@ impl Server {
     pub fn serve_tcp(self: &Arc<Self>, listener: TcpListener) -> io::Result<()> {
         for stream in listener.incoming() {
             let stream = stream?;
+            self.broker.ui().incoming();
             let server = self.clone();
             thread::spawn(move || {
                 // A failed handshake needs no reply: the peer is not one of ours.
@@ -311,9 +351,10 @@ impl Server {
             };
             let changed = sync::sync_as_callee(vault, &entries, &mut reader, &mut *lock(&writer))
                 .map_err(io::Error::other)?;
-            if changed > 0 {
-                self.broker.ui().synced(changed);
-            }
+            // Even with nothing changed here, the other device may now hold
+            // secrets that had one copy.
+            let _ = vault.note_synced(&remote_key);
+            self.broker.ui().synced(changed);
             return Ok(());
         }
 
@@ -414,9 +455,17 @@ impl Server {
                 ClientMsg::Pair { .. } => {
                     ServerMsg::Error { message: "pairing needs a pairing tunnel".into() }
                 }
-                ClientMsg::Peers => match self.peers() {
-                    Ok(devices) => ServerMsg::Peers { devices },
-                    Err(e) => ServerMsg::Error { message: e.to_string() },
+                ClientMsg::Peers => match (self.peers(), self.broker.vault().noise_keypair()) {
+                    (Ok(devices), Ok((_, public))) => ServerMsg::Peers {
+                        devices,
+                        sender: Some(hex::encode(public)),
+                        sender_active: self.broker.ui().user_active(),
+                    },
+                    (Err(e), _) | (_, Err(e)) => ServerMsg::Error { message: e.to_string() },
+                },
+                ClientMsg::EnrolLocal { name, public } => match self.enrol_local(&conn.requester, &name, &public) {
+                    Ok(device) => ServerMsg::Paired { device },
+                    Err(message) => ServerMsg::Error { message },
                 },
             };
             if send(&conn.writer, &reply).is_err() {
@@ -477,7 +526,9 @@ fn sync_over(
     let (private, _) = vault.noise_keypair()?;
     let (mut reader, mut writer) =
         dial(addresses, port, MODE_DEVICE, &private, public, None, Duration::from_secs(30))?;
-    sync::sync_as_caller(vault, &mut reader, &mut writer)
+    let changed = sync::sync_as_caller(vault, &mut reader, &mut writer)?;
+    vault.note_synced(public)?;
+    Ok(changed)
 }
 
 /// The half of adding a device done by a device that holds the vault: reads
@@ -711,16 +762,15 @@ impl Server {
             return Err(crate::Error::Vault(format!("{name} was added but has not synced yet")));
         };
         let changed = sync::sync_as_callee(vault, &entries, &mut reader, &mut writer)?;
-        if changed > 0 {
-            self.broker.ui().synced(changed);
-        }
+        vault.note_synced(&token.device_public)?;
+        self.broker.ui().synced(changed);
         Ok(name)
     }
 
     /// Publishes where this device can be reached, for other devices and
     /// machines to find it. Returns whether that changed.
-    pub fn announce(&self, port: u16, addresses: Vec<String>, wake: Option<mayi_proto::Wake>) -> crate::Result<bool> {
-        self.broker.vault().set_info(port, addresses, wake)
+    pub fn announce(&self, port: u16, addresses: Vec<String>) -> crate::Result<bool> {
+        self.broker.vault().set_info(port, addresses)
     }
 
     /// Syncs with every other device of the vault that can be reached now.

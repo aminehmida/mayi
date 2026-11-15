@@ -63,6 +63,9 @@ pub enum ClientMsg {
     Pair { name: String },
     /// Ask which vault devices hold this vault and where to find them.
     Peers,
+    /// Over the local socket only: enrol this machine's tunnel key (hex) as
+    /// a requester, so its requests can also reach the vault's other devices.
+    EnrolLocal { name: String, public: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,18 +89,18 @@ pub enum ServerMsg {
     },
     Peers {
         devices: Vec<Peer>,
+        /// The tunnel key of the device replying, so a requester on the same
+        /// machine can tell it apart from the others.
+        #[serde(default)]
+        sender: Option<String>,
+        /// Whether its owner is using the replying device right now; that
+        /// device is asked first.
+        #[serde(default)]
+        sender_active: bool,
     },
     Error {
         message: String,
     },
-}
-
-/// How to wake a vault device that is asleep (a phone): POST `id` to `url`.
-/// The push it triggers carries no content.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Wake {
-    pub url: String,
-    pub id: String,
 }
 
 /// A vault device as a requester needs to know it.
@@ -108,8 +111,6 @@ pub struct Peer {
     pub public_key: String,
     pub port: u16,
     pub addresses: Vec<String>,
-    #[serde(default)]
-    pub wake: Option<Wake>,
 }
 
 /// What a requester may learn about a secret: never its value.

@@ -63,6 +63,11 @@ pub fn generate_keypair() -> io::Result<(PrivateKey, PublicKey)> {
     Ok((Zeroizing::new(private), public))
 }
 
+/// The public half of a static key.
+pub fn public_key(private: &[u8; 32]) -> PublicKey {
+    curve25519_dalek::MontgomeryPoint::mul_base_clamped(*private).to_bytes()
+}
+
 /// Short identifier of a static key, used to name a paired machine.
 pub fn fingerprint(public: &PublicKey) -> String {
     hex::encode(&Sha256::digest(public)[..8])
@@ -441,6 +446,12 @@ mod tests {
         assert!(join.encode().starts_with("mayij1."));
         assert_eq!(PairingToken::decode(&join.encode()).unwrap(), join);
         assert_eq!(PairingToken::decode(&empty.encode()).unwrap(), empty);
+    }
+
+    #[test]
+    fn public_key_matches_the_generated_pair() {
+        let (private, public) = generate_keypair().unwrap();
+        assert_eq!(public_key(&private), public);
     }
 
     #[test]

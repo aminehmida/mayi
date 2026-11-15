@@ -138,4 +138,29 @@ import Testing
         #expect(result.status == 77)
         try await eventually { quick.pending.isEmpty }
     }
+
+    @Test func valuesAreShownOnlyToTheOwnerAndLogged() async throws {
+        let dir = try scratch()
+        let paths = MayiPaths(home: dir.appendingPathComponent("home"), socket: dir.appendingPathComponent("s.sock").path)
+        let away = AppModel(presence: FixedPresence(present: false))
+        try away.start(keys: TestKeys(), paths: paths, deviceName: "test")
+        _ = away.saveSecret(name: "TOKEN", level: 3, values: ["value": "abc123"], allow: [], maxGrantSecs: 0)
+        let secret = try #require(away.secrets.first)
+        #expect(secret.copies == 1, "a vault on one device holds one copy")
+        guard case .failure = await away.revealSecret(secret) else {
+            Issue.record("shown without the owner")
+            return
+        }
+
+        let dir2 = try scratch()
+        let owner = AppModel(presence: FixedPresence())
+        try owner.start(
+            keys: TestKeys(),
+            paths: MayiPaths(home: dir2.appendingPathComponent("home"), socket: dir2.appendingPathComponent("s.sock").path),
+            deviceName: "test")
+        _ = owner.saveSecret(name: "TOKEN", level: 3, values: ["value": "abc123"], allow: [], maxGrantSecs: 0)
+        let revealed = try await owner.revealSecret(try #require(owner.secrets.first)).get()
+        #expect(revealed.fields.map(\.value) == ["abc123"])
+        #expect(owner.log.last?.event == "view")
+    }
 }

@@ -8,10 +8,10 @@ import dev.mayi.ffi.MachineRecord
 import dev.mayi.ffi.MayiException
 import dev.mayi.ffi.NoticeInfo
 import dev.mayi.ffi.PromptInfo
+import dev.mayi.ffi.RevealedSecret
 import dev.mayi.ffi.SecretRecord
 import dev.mayi.ffi.UiDelegate
 import dev.mayi.ffi.VaultDevice
-import dev.mayi.ffi.WakeInfo
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -25,10 +25,17 @@ import java.util.concurrent.TimeoutException
  * the real core.
  */
 class MayiController(
-    /** A prompt nobody answers is denied after this long. */
-    private val approvalTimeoutMs: Long = 300_000,
+    /**
+     * A prompt nobody answers is denied after this long. The requester
+     * usually gives up first, which takes the prompt down.
+     */
+    private val approvalTimeoutMs: Long = 3_600_000,
     /** How long a notice stays visible after its command ended. */
     private val noticeLingerMs: Long = 4_000,
+    /** Whether the owner is using the phone right now. */
+    private val userActive: () -> Boolean = { false },
+    /** A machine just connected. */
+    private val onIncoming: () -> Unit = {},
 ) : UiDelegate {
     data class ActiveNotice(val notice: NoticeInfo, val ended: Boolean = false, val stopped: Boolean = false)
 
@@ -77,8 +84,8 @@ class MayiController(
 
     /** Starts accepting paired machines and other devices; returns the port. */
     @Throws(MayiException::class)
-    fun listen(port: UShort, addresses: List<String> = emptyList(), wake: WakeInfo? = null): UShort =
-        checkNotNull(device) { "the vault is not open" }.serveRemote(port, addresses, wake)
+    fun listen(port: UShort, addresses: List<String> = emptyList()): UShort =
+        checkNotNull(device) { "the vault is not open" }.serveRemote(port, addresses)
 
     // --- Called by the core, on its own threads ------------------------------
 
@@ -122,11 +129,23 @@ class MayiController(
 
     override fun synced(changed: ULong) = refresh()
 
+    override fun userActive(): Boolean = userActive.invoke()
+
+    override fun incoming() = onIncoming()
+
     // --- Called by the screens ------------------------------------------------
 
     fun answer(runId: ULong, choice: ApprovalChoice) {
         answers[runId]?.complete(choice)
     }
+
+    /**
+     * A secret's values, for its owner to see. Confirm they are present first;
+     * a level 4 secret asks for a fingerprint itself. Blocks. Logged as viewed.
+     */
+    fun reveal(name: String): Result<RevealedSecret> =
+        runCatching { checkNotNull(device) { "the vault is not open" }.revealSecret(name, "Show $name") }
+            .also { refresh() }
 
     /** Kills the command of a released run and revokes its session. */
     fun stop(runId: ULong) {

@@ -421,12 +421,7 @@ fn serve(listen: Option<String>) -> Res<()> {
         let tcp = std::net::TcpListener::bind(&address)?;
         port = Some(tcp.local_addr()?.port());
         eprintln!("accepting paired machines and devices on {}", tcp.local_addr()?);
-        // MAYI_WAKE=url,id stands in for a phone's push registration.
-        let wake = std::env::var("MAYI_WAKE").ok().and_then(|w| {
-            let (url, id) = w.split_once(',')?;
-            Some(mayi_proto::Wake { url: url.into(), id: id.into() })
-        });
-        server.announce(port.expect("set above"), advertised(), wake)?;
+        server.announce(port.expect("set above"), advertised())?;
         thread::spawn({
             let server = server.clone();
             move || server.serve_tcp(tcp)

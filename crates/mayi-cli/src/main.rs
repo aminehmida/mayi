@@ -8,13 +8,11 @@ mod config;
 mod fill;
 mod mask;
 mod mcp;
+mod reach;
 mod session;
 
 use std::io::{self, IsTerminal, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -22,8 +20,8 @@ use std::thread;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use mayi_proto::noise::{self, PairingToken, MODE_PAIRING, MODE_SESSION};
-use mayi_proto::{read_frame, write_frame, Binding, ClientMsg, Peer, RunRequest, ServerMsg, Wake, DEFAULT_FIELD};
+use mayi_proto::noise::{self, PairingToken, MODE_PAIRING};
+use mayi_proto::{read_frame, write_frame, Binding, ClientMsg, RunRequest, ServerMsg, DEFAULT_FIELD};
 
 use config::{Config, Device};
 use mask::Masker;
@@ -33,8 +31,6 @@ const EXIT_USAGE: u8 = 64;
 const EXIT_UNAVAILABLE: u8 = 69;
 const EXIT_TIMEOUT: u8 = 75;
 const EXIT_DENIED: u8 = 77;
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 type Failure = (u8, String);
 
@@ -61,8 +57,11 @@ enum Cmd {
         /// Identifier of the agent session
         #[arg(long, env = "MAYI_SESSION")]
         session: Option<String>,
-        /// Seconds to wait for the vault device to decide before giving up
-        #[arg(long, env = "MAYI_TIMEOUT", default_value_t = 120)]
+        /// Seconds to keep trying your devices until one takes the request
+        #[arg(long, env = "MAYI_WAIT", default_value_t = 3600)]
+        wait: u64,
+        /// Seconds to wait for your answer once a device has the request
+        #[arg(long, env = "MAYI_TIMEOUT", default_value_t = 900)]
         timeout: u64,
         /// Skip the vault device on this machine and use a paired one
         #[arg(long)]
@@ -122,8 +121,12 @@ enum Cmd {
         agent: Option<String>,
         #[arg(long, env = "MAYI_SESSION")]
         session: Option<String>,
-        /// Seconds to wait for the vault device to decide before giving up
-        #[arg(long, env = "MAYI_TIMEOUT", default_value_t = 120)]
+        /// Seconds to keep trying your devices until one takes the request;
+        /// shorter than for `run`, as sign-in pages go stale
+        #[arg(long, env = "MAYI_WAIT", default_value_t = 600)]
+        wait: u64,
+        /// Seconds to wait for your answer once a device has the request
+        #[arg(long, env = "MAYI_TIMEOUT", default_value_t = 900)]
         timeout: u64,
         /// Skip the vault device on this machine and use a paired one
         #[arg(long)]
@@ -146,144 +149,6 @@ enum Cmd {
 struct Channel {
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
-}
-
-fn socket_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("MAYI_SOCKET") {
-        return path.into();
-    }
-    let home = std::env::var_os("MAYI_HOME").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".mayi")
-    });
-    home.join("mayi.sock")
-}
-
-fn tcp_connect(address: &str, port: u16) -> io::Result<TcpStream> {
-    let mut last = io::Error::new(io::ErrorKind::NotFound, "address did not resolve");
-    for addr in (address, port).to_socket_addrs()? {
-        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
-            Ok(stream) => {
-                stream.set_nodelay(true)?;
-                return Ok(stream);
-            }
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
-}
-
-/// What a successful connection to a device returns: the conversation, the
-/// vault's current list of devices, and the address that worked.
-type Reached = (Channel, Vec<Peer>, String);
-
-/// Opens a session tunnel to a paired device, trying the address that worked
-/// last and then each announced one, and asks it for the vault's devices.
-fn connect_device(device: &Device, private: &[u8; 32]) -> io::Result<Reached> {
-    let public = device.public()?;
-    let mut last = io::Error::new(io::ErrorKind::NotFound, "no address known");
-    for (address, port) in device.candidates() {
-        let attempt = tcp_connect(&address, port).and_then(|mut stream| {
-            // Bound the handshake and the first exchange; afterwards the
-            // device may take minutes to decide.
-            stream.set_read_timeout(Some(CONNECT_TIMEOUT))?;
-            let transport = noise::connect(&mut stream, MODE_SESSION, private, &public, None)?;
-            let (mut reader, mut writer) = noise::split(transport, stream.try_clone()?, stream.try_clone()?);
-            write_frame(&mut writer, &ClientMsg::Peers)?;
-            let peers = match read_frame::<_, ServerMsg>(&mut reader)? {
-                Some(ServerMsg::Peers { devices }) => devices,
-                Some(ServerMsg::Error { message }) => return Err(io::Error::other(message)),
-                _ => return Err(io::Error::other("unexpected reply from the vault device")),
-            };
-            stream.set_read_timeout(None)?;
-            Ok((Channel { reader: Box::new(reader), writer: Box::new(writer) }, peers))
-        });
-        match attempt {
-            Ok((channel, peers)) => {
-                let shown = if address.contains(':') { format!("[{address}]") } else { address };
-                return Ok((channel, peers, format!("{shown}:{port}")));
-            }
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
-}
-
-/// Asks the wake-up gateway to send a device an empty push. Uses `curl`
-/// rather than linking a TLS stack into a binary that otherwise needs none.
-fn wake(wake: &Wake) -> io::Result<()> {
-    let body = serde_json::json!({ "id": wake.id }).to_string();
-    let status = Command::new("curl")
-        .args(["-fsS", "-m", "10", "-o", "/dev/null", "-X", "POST"])
-        .args(["-H", "content-type: application/json", "-d", &body, &wake.url])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() { Ok(()) } else { Err(io::Error::other("the wake-up gateway refused the request")) }
-}
-
-/// Connects to a device, waking it first if it is asleep and can be woken.
-fn reach_device(device: &Device, private: &[u8; 32]) -> io::Result<Reached> {
-    let first = connect_device(device, private);
-    let (Err(error), Some(gateway)) = (&first, &device.wake) else { return first };
-    if wake(gateway).is_err() {
-        return Err(io::Error::other(format!("{error}; and it could not be woken")));
-    }
-    let patience = std::env::var("MAYI_WAKE_WAIT").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
-    let deadline = std::time::Instant::now() + Duration::from_secs(patience);
-    loop {
-        thread::sleep(Duration::from_millis(500));
-        match connect_device(device, private) {
-            Ok(connected) => return Ok(connected),
-            Err(e) if std::time::Instant::now() >= deadline => {
-                return Err(io::Error::other(format!("{e}; woken but did not come up within {patience}s")))
-            }
-            Err(_) => {}
-        }
-    }
-}
-
-/// Finds a vault device: the one on this machine first, then paired ones.
-fn open_channel(remote_only: bool) -> Result<Channel, String> {
-    let socket = socket_path();
-    let pinned = std::env::var_os("MAYI_SOCKET").is_some();
-    let mut tried = Vec::new();
-    if !remote_only {
-        match UnixStream::connect(&socket) {
-            Ok(stream) => {
-                let reader = stream.try_clone().map_err(|e| e.to_string())?;
-                return Ok(Channel { reader: Box::new(reader), writer: Box::new(stream) });
-            }
-            Err(e) => tried.push(format!("this machine ({}): {e}", socket.display())),
-        }
-        if pinned {
-            return Err(format!("no vault device reachable: {}", tried.join("; ")));
-        }
-    }
-    let mut config = Config::load().map_err(|e| format!("{}: {e}", config::path().display()))?;
-    if config.devices.is_empty() {
-        tried.push("no paired device (see `mayi pair`)".into());
-    } else {
-        let private = config.private_key().map_err(|e| e.to_string())?;
-        for device in config.devices.clone() {
-            match reach_device(&device, &private) {
-                Ok((channel, peers, reached)) => {
-                    // Keep the address that worked, and learn about devices
-                    // added to or removed from the vault.
-                    let mut changed = false;
-                    if let Some(known) = config.devices.iter_mut().find(|d| d.public_key == device.public_key) {
-                        changed = known.reached.as_deref() != Some(reached.as_str());
-                        known.reached = Some(reached);
-                    }
-                    if config.update_peers(&device, peers) || changed {
-                        let _ = config.save();
-                    }
-                    return Ok(channel);
-                }
-                Err(e) => tried.push(format!("{}: {e}", device.name)),
-            }
-        }
-    }
-    Err(format!("no vault device reachable: {}", tried.join("; ")))
 }
 
 fn parse_binding(spec: &str) -> Result<Binding, String> {
@@ -357,12 +222,25 @@ fn requester_identity(agent: Option<String>, session: Option<String>) -> (String
     (agent, session)
 }
 
+/// How long to look for a device, and then to wait for an answer.
+#[derive(Clone, Copy)]
+pub struct Patience {
+    pub wait: Duration,
+    pub timeout: Duration,
+}
+
+impl Patience {
+    fn secs(wait: u64, timeout: u64) -> Self {
+        Self { wait: Duration::from_secs(wait), timeout: Duration::from_secs(timeout) }
+    }
+}
+
 fn run(
     secrets: Vec<String>,
     reason: String,
     agent: Option<String>,
     session: Option<String>,
-    timeout: u64,
+    patience: Patience,
     remote: bool,
     command: Vec<String>,
 ) -> Result<u8, Failure> {
@@ -383,22 +261,12 @@ fn run(
         site: None,
     };
 
-    let Channel { reader, mut writer } = open_channel(remote).map_err(|e| (EXIT_UNAVAILABLE, e))?;
-    write_frame(&mut writer, &ClientMsg::Run(request))
-        .map_err(|e| (EXIT_UNAVAILABLE, format!("vault device connection lost: {e}")))?;
-    let replies = replies(reader);
-    // Dropping the connection on timeout makes the device withdraw its prompt.
-    let env = match replies.recv_timeout(Duration::from_secs(timeout)) {
-        Ok(ServerMsg::Released { env, .. }) => env,
-        Ok(ServerMsg::Denied { reason }) => return Err((EXIT_DENIED, format!("denied: {reason}"))),
-        Ok(ServerMsg::Error { message }) => return Err((EXIT_UNAVAILABLE, message)),
-        Ok(_) => return Err((EXIT_UNAVAILABLE, "unexpected reply from the vault device".into())),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            return Err((EXIT_TIMEOUT, format!("no decision from the vault device within {timeout}s")))
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            return Err((EXIT_UNAVAILABLE, "the vault device closed the connection".into()))
-        }
+    let reach::Answer { reply, replies, mut writer } =
+        reach::ask(&request, remote, patience.wait, patience.timeout)?;
+    let env = match reply {
+        ServerMsg::Released { env, .. } => env,
+        ServerMsg::Denied { reason } => return Err((EXIT_DENIED, format!("denied: {reason}"))),
+        _ => return Err((EXIT_UNAVAILABLE, "unexpected reply from the vault device".into())),
     };
 
     let mut child_cmd = Command::new(&command[0]);
@@ -456,7 +324,7 @@ fn run(
 }
 
 fn list(remote: bool) -> Result<u8, Failure> {
-    let Channel { reader, mut writer } = open_channel(remote).map_err(|e| (EXIT_UNAVAILABLE, e))?;
+    let Channel { reader, mut writer } = reach::any(remote, Duration::from_secs(10))?;
     write_frame(&mut writer, &ClientMsg::List)
         .map_err(|e| (EXIT_UNAVAILABLE, format!("vault device connection lost: {e}")))?;
     match replies(reader).recv_timeout(Duration::from_secs(10)) {
@@ -488,8 +356,8 @@ fn pair(token: String, name: Option<String>) -> Result<u8, Failure> {
 
     let mut last = "the token lists no address".to_string();
     for address in &token.addresses {
-        let attempt = tcp_connect(address, token.port).and_then(|mut stream| {
-            stream.set_read_timeout(Some(CONNECT_TIMEOUT))?;
+        let attempt = reach::tcp_connect(address, token.port).and_then(|mut stream| {
+            stream.set_read_timeout(Some(reach::CONNECT_TIMEOUT))?;
             let transport =
                 noise::connect(&mut stream, MODE_PAIRING, &private, &token.device_public, Some(&token.secret))?;
             let (mut reader, mut writer) = noise::split(transport, stream.try_clone()?, stream);
@@ -503,9 +371,9 @@ fn pair(token: String, name: Option<String>) -> Result<u8, Failure> {
                     public_key: hex::encode(token.device_public),
                     port: token.port,
                     addresses: token.addresses.clone(),
-                    wake: None,
                     vault: None,
                     reached: Some(format!("{address}:{}", token.port)),
+                    seen: None,
                 });
                 config.save().map_err(fail)?;
                 println!("Paired with {device} as {name}.");
@@ -525,16 +393,16 @@ fn pair(token: String, name: Option<String>) -> Result<u8, Failure> {
 fn devices() -> Result<u8, Failure> {
     let config = Config::load().map_err(|e| (EXIT_UNAVAILABLE, e.to_string()))?;
     for device in &config.devices {
-        let wake = if device.wake.is_some() { "\tcan be woken" } else { "" };
-        println!("{}\t{}\tport {}{wake}", device.name, device.addresses.join(","), device.port);
+        let seen = device.seen.map(|t| format!("\tlast reached {}", reach::clock(t))).unwrap_or_default();
+        println!("{}\t{}\tport {}{seen}", device.name, device.addresses.join(","), device.port);
     }
     Ok(0)
 }
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Cmd::Run { secrets, reason, agent, session, timeout, remote, command } => {
-            run(secrets, reason, agent, session, timeout, remote, command)
+        Cmd::Run { secrets, reason, agent, session, wait, timeout, remote, command } => {
+            run(secrets, reason, agent, session, Patience::secs(wait, timeout), remote, command)
         }
         Cmd::List { remote } => list(remote),
         Cmd::Pair { token, name } => pair(token, name),
@@ -550,6 +418,7 @@ fn main() -> ExitCode {
             code_selector,
             agent,
             session,
+            wait,
             timeout,
             remote,
         } => fill::fill(fill::FillArgs {
@@ -557,7 +426,7 @@ fn main() -> ExitCode {
             reason,
             agent,
             session,
-            timeout,
+            patience: Patience::secs(wait, timeout),
             remote,
             browser,
             tab,

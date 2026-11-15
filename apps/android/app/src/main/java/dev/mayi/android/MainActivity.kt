@@ -3,12 +3,17 @@ package dev.mayi.android
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.text.format.DateUtils
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,6 +54,8 @@ import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Card
@@ -82,6 +89,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -96,16 +106,17 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.mayi.ffi.ApprovalChoice
 import dev.mayi.ffi.AuditRecord
 import dev.mayi.ffi.DeviceInfo
 import dev.mayi.ffi.JoinInvitation
 import dev.mayi.ffi.PromptInfo
+import dev.mayi.ffi.RevealedSecret
 import dev.mayi.ffi.SecretRecord
 import java.text.DateFormat
 import java.util.Calendar
@@ -115,6 +126,17 @@ class MainActivity : FragmentActivity() {
     private val app get() = application as MayiApp
     /** Bumped on every resume, so screens re-check settings changed meanwhile. */
     private val resumes = androidx.compose.runtime.mutableIntStateOf(0)
+    /** Where a scanned code goes, while the scanner is open. */
+    private val scanning = mutableStateOf<((String) -> Unit)?>(null)
+    private var scanAfterPermission: ((String) -> Unit)? = null
+    private val askCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val onToken = scanAfterPermission.also { scanAfterPermission = null }
+        if (granted) {
+            scanning.value = onToken
+        } else {
+            Toast.makeText(this, "Mayi needs the camera to scan a code. You can enter the code as text instead.", Toast.LENGTH_LONG).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -127,7 +149,22 @@ class MainActivity : FragmentActivity() {
             MayiTheme {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     var ready by remember { mutableStateOf(app.hasVault) }
-                    if (ready) Home(app, ::scan, resumes) else Setup(app, ::scan) { ready = true }
+                    var askBackground by remember { mutableStateOf(false) }
+                    when {
+                        !ready -> Setup(app, ::scan) {
+                            askBackground = !app.backgroundAllowed
+                            ready = true
+                        }
+                        askBackground -> BackgroundStep(app, resumes) { askBackground = false }
+                        else -> Home(app, ::scan, resumes)
+                    }
+                    scanning.value?.let { onToken ->
+                        BackHandler { scanning.value = null }
+                        QrScanner(this@MainActivity, onCode = {
+                            scanning.value = null
+                            onToken(it)
+                        }, onCancel = { scanning.value = null })
+                    }
                 }
             }
         }
@@ -145,8 +182,11 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun scan(onToken: (String) -> Unit) {
-        GmsBarcodeScanning.getClient(this).startScan().addOnSuccessListener { code ->
-            code.rawValue?.let(onToken)
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            scanning.value = onToken
+        } else {
+            scanAfterPermission = onToken
+            askCamera.launch(Manifest.permission.CAMERA)
         }
     }
 }
@@ -293,6 +333,50 @@ private fun Setup(app: MayiApp, scan: ((String) -> Unit) -> Unit, onReady: () ->
     }
 }
 
+/**
+ * After setup: asks Android to leave Mayi running while the phone sleeps, so
+ * requests reach it. Moves on by itself once allowed.
+ */
+@Composable
+private fun BackgroundStep(app: MayiApp, resumes: MutableIntState, onDone: () -> Unit) {
+    val context = LocalContext.current
+    val allowed = remember(resumes.intValue) { app.backgroundAllowed }
+    LaunchedEffect(allowed) { if (allowed) onDone() }
+    val quiet = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Spacer(Modifier.height(48.dp))
+        AppIcon(72.dp)
+        Text("Let Mayi answer while your phone sleeps", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            "Your agents ask this phone over your Wi-Fi or Tailscale. To save battery, Android stops apps in the " +
+                "background, and a stopped Mayi cannot hear them. Mayi only listens and never checks in, so " +
+                "this costs almost no battery.",
+            style = MaterialTheme.typography.bodyLarge, color = quiet,
+        )
+        Button(onClick = { app.askToRunInBackground(context) }, modifier = Modifier.fillMaxWidth()) {
+            Text("Allow in the background")
+        }
+        app.makerHelpPage?.let { page ->
+            Text(
+                "Your phone's maker may stop apps even so. dontkillmyapp.com says what else to turn off on this phone.",
+                style = MaterialTheme.typography.bodyMedium, color = quiet,
+            )
+            OutlinedButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(page))) }) {
+                Text("What else to turn off")
+            }
+        }
+        Text(
+            "Away from home, keep Tailscale connected: in Android's VPN settings, turn on Always-on VPN for Tailscale.",
+            style = MaterialTheme.typography.bodySmall, color = quiet,
+        )
+        TextButton(onClick = onDone, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("Not now") }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
 /** A code, as a QR code and as text, with the usual ways to pass it on. */
 @Composable
 private fun CodeToPass(code: String, label: String, qr: Boolean = true) {
@@ -432,7 +516,7 @@ private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit, resumes: Mutabl
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (tab) {
-                0 -> Requests(controller, state, notificationsBlocked = remember(resumes.intValue) { app.notificationsBlocked })
+                0 -> Requests(controller, state, remember(resumes.intValue) { ReachProblems.of(app) })
                 1 -> Secrets(controller, state, adding, scan) { adding = it }
                 2 -> Devices(app, controller, state, addingDevice, scan) { addingDevice = it }
                 else -> Activity(state.log)
@@ -443,26 +527,50 @@ private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit, resumes: Mutabl
 
 // --- Requests ---------------------------------------------------------------------
 
+/** What keeps requests from reaching this phone while Mayi is in the background. */
+private data class ReachProblems(val notificationsOff: Boolean, val stoppedInBackground: Boolean, val makerPage: String?) {
+    val any get() = notificationsOff || stoppedInBackground
+
+    companion object {
+        fun of(app: MayiApp) = ReachProblems(app.notificationsBlocked, !app.backgroundAllowed, app.makerHelpPage)
+    }
+}
+
 @Composable
-private fun Requests(controller: MayiController, state: MayiController.State, notificationsBlocked: Boolean) {
+private fun Requests(controller: MayiController, state: MayiController.State, problems: ReachProblems) {
     val context = LocalContext.current
+    val app = context.applicationContext as MayiApp
     Column {
-        if (notificationsBlocked) {
+        if (problems.any) {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Notifications are off", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "Requests that arrive while Mayi is in the background cannot reach you, and time out.",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Button(onClick = {
-                        context.startActivity(
-                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+                    Text("Requests may not reach you", style = MaterialTheme.typography.titleSmall)
+                    if (problems.notificationsOff) {
+                        Text(
+                            "Notifications are off, so a request that arrives while Mayi is in the background cannot tell you.",
+                            style = MaterialTheme.typography.bodyMedium,
                         )
-                    }) { Text("Turn on") }
+                        Button(onClick = {
+                            context.startActivity(
+                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+                            )
+                        }) { Text("Turn on notifications") }
+                    }
+                    if (problems.stoppedInBackground) {
+                        Text(
+                            "Android may stop Mayi in the background to save battery, and then your agents cannot reach this phone.",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Button(onClick = { app.askToRunInBackground(context) }) { Text("Allow in the background") }
+                        problems.makerPage?.let { page ->
+                            TextButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(page))) }) {
+                                Text("What else your phone's maker may stop")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -646,9 +754,25 @@ private fun Secrets(
 ) {
     var detail by remember { mutableStateOf<SecretRecord?>(null) }
     var editing by remember { mutableStateOf<SecretRecord?>(null) }
+    /** Open the edit sheet with the values shown. */
+    var showing by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val scheme = MaterialTheme.colorScheme
+    val app = LocalContext.current.applicationContext as MayiApp
+    // The owner confirms with a fingerprint first; a level 4 secret's own
+    // unlock asks for it instead.
+    val reveal = { secret: SecretRecord, done: (Result<RevealedSecret>) -> Unit ->
+        Thread {
+            done(
+                if (secret.level < 4u && !app.authenticate("Show ${secret.name}")) {
+                    Result.failure(IllegalStateException("Showing values needs your fingerprint."))
+                } else {
+                    controller.reveal(secret.name)
+                },
+            )
+        }.start()
+    }
 
     if (state.secrets.isEmpty()) {
         EmptyState(Icons.Outlined.Key, "No secrets yet", "Add an API key, a token or a website login. An agent then uses it by name and never sees the value.")
@@ -665,7 +789,15 @@ private fun Secrets(
                             contentDescription = if (secret.login) "Website login" else "Secret",
                         )
                     },
-                    headlineContent = { Text(secret.name, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    headlineContent = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                secret.name, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (secret.copies < 2u) OneCopyDot()
+                        }
+                    },
                     supportingContent = { Text(summary(secret), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     trailingContent = { LevelLabel(secret.level.toInt()) },
                     modifier = Modifier.clickable { detail = secret },
@@ -693,7 +825,10 @@ private fun Secrets(
             onDismissRequest = { editing = null },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
-            AddSecret(scan = scan, existing = secret, onCancel = { editing = null }) { draft ->
+            AddSecret(
+                scan = scan, existing = secret, onCancel = { editing = null },
+                reveal = { done -> reveal(secret, done) }, revealOnOpen = showing,
+            ) { draft ->
                 val problem = save(controller, draft)
                 if (problem == null) editing = null
                 problem
@@ -713,20 +848,32 @@ private fun Secrets(
                     style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
                 )
                 Text(summary(secret) + ".", style = MaterialTheme.typography.bodyMedium)
+                if (secret.copies < 2u) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OneCopyDot()
+                        Text(
+                            "Only on this phone. It reaches your other devices when they next sync; add a device to keep a second copy.",
+                            style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 Spacer(Modifier.height(4.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
+                        showing = true
+                        editing = secret
+                        detail = null
+                    }) { Text("Show values") }
+                    OutlinedButton(onClick = {
+                        showing = false
                         editing = secret
                         detail = null
                     }) { Text("Edit") }
-                    OutlinedButton(
-                        onClick = {
-                            deleting = secret.name
-                            detail = null
-                        },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = scheme.error),
-                    ) { Text(if (secret.login) "Delete login" else "Delete secret") }
                 }
+                TextButton(onClick = {
+                    deleting = secret.name
+                    detail = null
+                }) { Text(if (secret.login) "Delete login" else "Delete secret", color = scheme.error) }
             }
         }
     }
@@ -776,7 +923,12 @@ private val grantChoices = listOf(0uL to "Every time", 300uL to "5 min", 900uL t
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddSecret(
-    scan: ((String) -> Unit) -> Unit, existing: SecretRecord?, onCancel: () -> Unit, onSave: (NewSecret) -> String?,
+    scan: ((String) -> Unit) -> Unit, existing: SecretRecord?, onCancel: () -> Unit,
+    /** Decrypts the stored values once the owner confirms; calls back on any thread. */
+    reveal: (((Result<RevealedSecret>) -> Unit) -> Unit)? = null,
+    /** Show the values as soon as the sheet opens. */
+    revealOnOpen: Boolean = false,
+    onSave: (NewSecret) -> String?,
 ) {
     val editing = existing != null
     var login by remember { mutableStateOf(existing?.login ?: false) }
@@ -792,18 +944,68 @@ private fun AddSecret(
     var error by remember { mutableStateOf<String?>(null) }
     val scheme = MaterialTheme.colorScheme
     val mono = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace)
-    // This sheet edits one value; a secret with several fields keeps its values here.
+    val context = LocalContext.current
     val severalFields = existing != null && !existing.login && existing.fields != listOf("value")
-    val keep = if (editing) "unchanged" else null
+    /** The stored values, once shown: saving them unchanged changes only the rules. */
+    var shown by remember { mutableStateOf<Map<String, String>?>(null) }
+    val fieldValues = remember { mutableStateMapOf<String, String>() }
+    /** A login's current two-factor code, and until when it is valid. */
+    var code by remember { mutableStateOf<Pair<String, Long>?>(null) }
+    var revealing by remember { mutableStateOf(false) }
+    fun showValues() {
+        val decrypt = reveal ?: return
+        revealing = true
+        error = null
+        decrypt { result ->
+            revealing = false
+            result.onSuccess { revealed ->
+                val values = revealed.fields.associate { it.name to it.value }
+                when {
+                    existing?.login == true -> {
+                        username = values["username"] ?: ""
+                        password = values["password"] ?: ""
+                        twoFactor = values["totp"] ?: ""
+                    }
+                    severalFields -> {
+                        fieldValues.clear()
+                        fieldValues.putAll(values)
+                    }
+                    else -> value = values["value"] ?: ""
+                }
+                code = revealed.code?.let { it to System.currentTimeMillis() + revealed.codeValidSecs.toLong() * 1000 }
+                shown = values
+            }.onFailure { error = MayiController.describe(it) }
+        }
+    }
+    LaunchedEffect(Unit) { if (revealOnOpen) showValues() }
+    val keep = if (editing && shown == null) "unchanged" else null
+    val copy = @Composable { text: String ->
+        IconButton(onClick = { copySecret(context, text) }, enabled = text.isNotEmpty()) {
+            Icon(Icons.Outlined.ContentCopy, contentDescription = "Copy")
+        }
+    }
     val secretField = @Composable { text: String, set: (String) -> Unit, label: String, trailing: (@Composable () -> Unit)? ->
+        // Hidden while typing a new value; readable, with a copy button, once shown.
+        val visible = shown != null
         OutlinedTextField(
             text, set, Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true,
             placeholder = keep?.let { hint -> { Text(hint) } },
-            visualTransformation = PasswordVisualTransformation(),
+            visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
+            textStyle = if (visible) mono else MaterialTheme.typography.bodyLarge,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            trailingIcon = trailing,
+            trailingIcon = if (visible) ({ copy(text) }) else trailing,
         )
     }
+    val showButton = @Composable {
+        if (editing && reveal != null && shown == null) {
+            OutlinedButton(onClick = ::showValues, enabled = !revealing) {
+                Icon(Icons.Outlined.Visibility, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                Text(if (revealing) "Waiting for you…" else "Show values")
+            }
+        }
+    }
+    val shownHint = "Edit what you need and save. Copied values are cleared from the clipboard after a minute."
     Column(
         Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp).imePadding().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -839,6 +1041,7 @@ private fun AddSecret(
             OutlinedTextField(
                 username, { username = it }, Modifier.fillMaxWidth(), label = { Text("Username (optional)") }, singleLine = true,
                 placeholder = keep?.let { hint -> { Text(hint) } },
+                trailingIcon = if (shown != null) ({ copy(username) }) else null,
             )
             secretField(password, { password = it }, "Password", null)
             secretField(twoFactor, { twoFactor = it }, "Two-factor key (optional)") {
@@ -846,21 +1049,36 @@ private fun AddSecret(
                     Icon(Icons.Outlined.QrCodeScanner, contentDescription = "Scan the site’s QR code")
                 }
             }
+            code?.let { (current, until) -> CurrentCode(current, until, copy, onExpired = ::showValues) }
+            showButton()
             Text(
-                if (editing) "Leave all three empty to keep what is stored. Changing the level needs the password again."
-                else "The two-factor key is what a site shows when you turn on an authenticator app: scan its QR code, or paste the key. It stays on your devices; a page only ever gets the current code.",
+                when {
+                    shown != null -> shownHint
+                    editing -> "Leave all three empty to keep what is stored, or show them to read and edit them. Changing the level needs the password again."
+                    else -> "The two-factor key is what a site shows when you turn on an authenticator app: scan its QR code, or paste the key. It stays on your devices; a page only ever gets the current code."
+                },
                 style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
             )
         } else if (severalFields) {
-            Text(
-                "This secret holds ${existing?.fields?.joinToString()}. Change its values on your Mac; here, its rules.",
-                style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
-            )
+            if (shown == null) {
+                Text(
+                    "This secret holds ${existing?.fields?.joinToString()}. Show its values to read and edit them.",
+                    style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
+                )
+                showButton()
+            } else {
+                for (field in existing?.fields.orEmpty()) {
+                    secretField(fieldValues[field] ?: "", { fieldValues[field] = it }, field, null)
+                }
+                Text(shownHint, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+            }
         } else {
             secretField(value, { value = it }, "Value", null)
+            showButton()
             if (editing) {
                 Text(
-                    "Leave empty to keep what is stored. Changing the level needs the value again.",
+                    if (shown != null) shownHint
+                    else "Leave empty to keep what is stored, or show it to read and edit it. Changing the level needs the value again.",
                     style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
                 )
             }
@@ -871,12 +1089,15 @@ private fun AddSecret(
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .selectable(selected = level == step, role = Role.RadioButton, enabled = !severalFields, onClick = { level = step })
+                        .selectable(
+                            selected = level == step, role = Role.RadioButton, enabled = !severalFields || shown != null,
+                            onClick = { level = step },
+                        )
                         .padding(vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    RadioButton(selected = level == step, onClick = null, enabled = !severalFields)
+                    RadioButton(selected = level == step, onClick = null, enabled = !severalFields || shown != null)
                     Icon(levelIcon(step), contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                     Column {
                         Text(levelNames[step - 1], style = MaterialTheme.typography.bodyLarge)
@@ -909,20 +1130,25 @@ private fun AddSecret(
             TextButton(onClick = onCancel) { Text("Cancel") }
             Button(
                 onClick = {
-                    val values: Map<String, String> = when {
+                    val entered: Map<String, String> = when {
                         login && editing && username.isEmpty() && password.isEmpty() && twoFactor.isEmpty() -> emptyMap()
                         login -> buildMap {
                             put("password", password)
                             if (username.isNotBlank()) put("username", username.trim())
                             if (twoFactor.isNotBlank()) put("totp", twoFactor.trim())
                         }
+                        severalFields && shown == null -> emptyMap()
+                        severalFields -> fieldValues.toMap()
                         editing && value.isEmpty() -> emptyMap()
                         else -> mapOf("value" to value)
                     }
+                    // Shown values saved as they were: only the rules change.
+                    val values = if (entered == shown && level == existing?.level?.toInt()) emptyMap() else entered
                     error = when {
                         name.isBlank() -> "Give it a name."
                         login && lines(sites).isEmpty() -> "Add the website this login is for."
                         login && values.isNotEmpty() && password.isEmpty() -> "Enter the password."
+                        severalFields && values.values.any { it.isEmpty() } -> "Enter a value for every field."
                         !editing && values.isEmpty() -> "Enter the value."
                         editing && values.isEmpty() && level != existing?.level?.toInt() ->
                             "Changing the level re-encrypts it, so enter its " + (if (login) "password" else "value") + " again."
@@ -936,6 +1162,32 @@ private fun AddSecret(
                 },
             ) { Text(if (editing) "Save" else if (login) "Add login" else "Add secret") }
         }
+    }
+}
+
+/** A login's two-factor code, counting down; once expired, a way to show the next one. */
+@Composable
+private fun CurrentCode(current: String, until: Long, copy: @Composable (String) -> Unit, onExpired: () -> Unit) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(until) {
+        while (now < until) {
+            kotlinx.coroutines.delay(1000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val left = ((until - now + 999) / 1000).toInt()
+    if (left > 0) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Code now", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            Text(current, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace)
+            Text(
+                "  for $left s", style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            copy(current)
+        }
+    } else {
+        TextButton(onClick = onExpired) { Text("Show the next code") }
     }
 }
 
@@ -1245,7 +1497,10 @@ private fun Devices(
             ListItem(
                 leadingContent = { Icon(Icons.Outlined.Dns, contentDescription = null) },
                 headlineContent = { Text(machine.name) },
-                supportingContent = { Text("Key ${machine.id.take(8)}") },
+                supportingContent = {
+                    // A machine that holds a vault device and paired itself through it.
+                    Text(machine.runsDevice?.let { "Agents on $it. Key ${machine.id.take(8)}" } ?: "Key ${machine.id.take(8)}")
+                },
                 trailingContent = {
                     if (machine.revoked) {
                         Text("Revoked", color = scheme.error)
@@ -1350,11 +1605,12 @@ private fun Activity(log: List<AuditRecord>) {
                                 request && released -> Icons.Outlined.Key
                                 request -> Icons.Outlined.Cancel
                                 entry.event == "stop" -> Icons.Outlined.StopCircle
+                                entry.event == "view" -> Icons.Outlined.Visibility
                                 else -> Icons.Outlined.Check
                             },
                             contentDescription = null,
                             tint = when {
-                                request && released -> scheme.onSurface
+                                request && released || entry.event == "view" -> scheme.onSurface
                                 entry.event == "exit" -> scheme.outline
                                 else -> scheme.error
                             },
@@ -1370,6 +1626,7 @@ private fun Activity(log: List<AuditRecord>) {
                                 }
                                 request -> if (names.isEmpty()) "Request refused" else "Refused $names"
                                 entry.event == "stop" -> if (signIn) "Sign-in stopped by you" else "Command stopped by you"
+                                entry.event == "view" -> "You viewed $names on this phone"
                                 // A sign-in's "command" is the typing; its exit says whether that worked.
                                 signIn -> if (entry.outcome == "exit 0") "Sign-in submitted" else "Sign-in not completed"
                                 else -> "Command finished" + if (entry.outcome.startsWith("exit ")) ", ${entry.outcome}" else ""
