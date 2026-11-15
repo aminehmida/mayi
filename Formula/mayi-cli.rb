@@ -4,28 +4,18 @@ class MayiCli < Formula
   homepage "https://github.com/aminehmida/mayi"
   version "0.1.0-alpha.3"
 
-  # The release files are in a private repository, so they are fetched
-  # through the GitHub API with a token that can read it.
-  # Homebrew runs this with a reduced PATH, so gh is looked up in the
-  # caller's own.
-  token = ENV.fetch("HOMEBREW_GITHUB_API_TOKEN", "").strip
-  if token.empty? && (gh = which("gh", ORIGINAL_PATHS))
-    token = ::Utils.popen_read(gh.to_s, "auth", "token", "--user", "aminehmida").strip
-  end
-  headers = ["Accept: application/octet-stream", "Authorization: Bearer #{token}"]
-
   on_macos do
     depends_on arch: :arm64
-    url "https://api.github.com/repos/aminehmida/mayi/releases/assets/751385956", headers: headers
+    url "https://github.com/aminehmida/mayi/releases/download/v0.1.0-alpha.3/mayi-0.1.0-alpha.3-aarch64-apple-darwin.tar.gz"
     sha256 "aa4d5e035e420a16805399a8b3b33329d4b0827684bc9b57f096bbcf1cd25653"
   end
   on_linux do
     on_intel do
-      url "https://api.github.com/repos/aminehmida/mayi/releases/assets/751385979", headers: headers
+      url "https://github.com/aminehmida/mayi/releases/download/v0.1.0-alpha.3/mayi-0.1.0-alpha.3-x86_64-unknown-linux-musl.tar.gz"
       sha256 "1f7c89de27e3a8aad4fce45c1fba77eb48421670fe8566b390b54eb07a284e37"
     end
     on_arm do
-      url "https://api.github.com/repos/aminehmida/mayi/releases/assets/751385949", headers: headers
+      url "https://github.com/aminehmida/mayi/releases/download/v0.1.0-alpha.3/mayi-0.1.0-alpha.3-aarch64-unknown-linux-musl.tar.gz"
       sha256 "55b10b0c5d3cdcf8fd09a6f3478a133f8207ed0ee54fc95b1ddef068d1699017"
     end
   end

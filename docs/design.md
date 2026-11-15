@@ -12,8 +12,6 @@ AI agents need credentials to do real work, but today a secret either sits in th
 
 Mayi ("May I?") is that combination. An agent asks for a secret by name, with the command it wants to run and a reason. A device you own decides whether to release it, and the value is injected into the command without entering the model's context.
 
-Greenfield project at `~/Sources/mayi` (local git repo, author `Amine Hmida <aminehmida@gmail.com>`, single-line commit subjects, no remote until asked).
-
 ## Decisions from the brainstorm
 
 | Area | Decision |

@@ -164,20 +164,18 @@ app was run on the emulator. Not yet tried by hand on the Mac:
 
 ## The first release (v0.1.0-alpha.1)
 
-Built by `scripts/release.sh` and published by `scripts/publish.py` to the
-private repository `aminehmida/mayi`. The release APK was installed on the
+Built by `scripts/release.sh` and published by `scripts/publish.py` to
+`aminehmida/mayi` (private at first, public since alpha.3). The release APK was installed on the
 emulator and starts (it then refuses to create a vault, as it should without
 secure hardware). Still to do by hand:
 
 - [ ] Back up the Android signing key `~/.android/mayi-release.jks` and its
       password (keychain item `mayi-android-release`). Losing either means
       the next release cannot update installed copies.
-- [ ] Let git reach the tap as aminehmida (README, "Install"). I could not:
-      changing your global git credentials was refused by my permissions.
 - [ ] `brew tap` and `brew install --cask aminehmida/mayi/mayi`, then open
       Mayi from Applications.
-- [ ] Obtainium on your phone: token, the repository URL, "Include
-      prereleases", install, and later an update.
+- [ ] Obtainium on your phone: the repository URL, "Include prereleases",
+      install, and later an update.
 
 ## Joining a vault from either side (v0.1.0-alpha.2)
 
@@ -219,8 +217,7 @@ real Secure Enclave). Still to do by hand:
 
 ## Decisions waiting for you
 
-- [ ] The first commit is made and pushed to the private repository
-      `aminehmida/mayi`.
+- [x] The repository `aminehmida/mayi` is public.
 - [ ] The name "Mayi" is unchecked for trademark, domain and package conflicts.
 - [ ] No licence has been chosen.
 - [x] Level 4 on the Mac accepts Touch ID, an Apple Watch or the login
@@ -232,7 +229,6 @@ real Secure Enclave). Still to do by hand:
       recovery key cannot revoke access to secrets below level 4 that they
       could already read. Rotating the vault key would close that; it is a
       sizeable change (every device must receive the new key).
-- [ ] `~/Sources/mawaqit-old` (19 GB) was deleted at your request.
 - [ ] Devices do not find each other by mDNS yet; they use the addresses each
       device publishes. That is reliable over Tailscale and on a network
       where at least one side keeps its address.
@@ -240,9 +236,5 @@ real Secure Enclave). Still to do by hand:
       fingerprint, because binding each single use to a fingerprint needs
       Android 15. The Mac's key is per use.
 - [x] The phone can now pair machines and add, remove and invite devices.
-- [ ] Java (Temurin 21) was installed through mise for the Android build.
-- [ ] I started Docker Desktop to test the Linux binary and quit it afterwards.
-      I tried again for the website logins; its engine never answered and its
-      window may still be open.
 - [ ] The app does not start at login and is signed ad hoc, which is enough to
       run it locally but not to distribute it.

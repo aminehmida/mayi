@@ -17,53 +17,43 @@ it with secrets that matter.
 
 ## Install
 
-The current release is an alpha: `v0.1.0-alpha.3`. This repository is
-private, so every installer needs a GitHub token that can read it.
+The current release is an alpha, `v0.1.0-alpha.3`. Downloads are on the
+[releases page](https://github.com/aminehmida/mayi/releases).
 
 ### Mac (Homebrew)
 
 ```sh
-brew tap aminehmida/mayi https://aminehmida@github.com/aminehmida/mayi.git
+brew tap aminehmida/mayi https://github.com/aminehmida/mayi
 brew install --cask aminehmida/mayi/mayi        # Mayi.app, and the mayi command
 ```
 
-The repository is its own tap: `Formula/` and `Casks/` are read from the
-default branch. Two things need to reach it as aminehmida:
+The repository is its own tap, which is why `brew tap` needs its URL. The
+app is for Apple silicon and macOS 14 or later. It is signed ad hoc, not
+notarized by Apple; the cask clears its quarantine flag so that it opens.
+Without Homebrew, unzip `Mayi-….zip` from the releases page into
+Applications, then run `xattr -dr com.apple.quarantine /Applications/Mayi.app`
+once.
 
-- **The download** of release files goes through the GitHub API with
-  `HOMEBREW_GITHUB_API_TOKEN` if it is set, or else
-  `gh auth token --user aminehmida`. With the GitHub CLI signed in to that
-  account, nothing else is needed, for upgrades too.
-- **Cloning the tap** uses git's own credentials. If git on your machine signs
-  in to GitHub as another account, tell it how to get the aminehmida token for
-  URLs that name that user, once:
+### Other machines
 
-  ```sh
-  git config --global --add 'credential.https://aminehmida@github.com.helper' ''
-  git config --global --add 'credential.https://aminehmida@github.com.helper' \
-    '!f() { test "$1" = get && echo username=aminehmida && echo "password=$(gh auth token --user aminehmida)"; }; f'
-  ```
+`brew install aminehmida/mayi/mayi-cli` installs only the `mayi` command, on a
+server or a Mac without the app (macOS on Apple silicon, Linux on x86_64 or
+ARM). Without Homebrew, the Linux builds are static binaries:
 
-  It applies only to URLs that start with `https://aminehmida@github.com`, and
-  stores nothing. Remove it with
-  `git config --global --remove-section 'credential.https://aminehmida@github.com'`.
-
-On a server or a Mac without the app, `brew install aminehmida/mayi/mayi-cli`
-installs only the `mayi` command (macOS on Apple silicon, Linux on x86_64 or
-ARM). Without Homebrew:
-`gh release download v0.1.0-alpha.3 -R aminehmida/mayi -p 'mayi-*-x86_64-unknown-linux-musl.tar.gz'`.
+```sh
+curl -fsSL https://github.com/aminehmida/mayi/releases/download/v0.1.0-alpha.3/mayi-0.1.0-alpha.3-x86_64-unknown-linux-musl.tar.gz | tar xz
+sudo install mayi-0.1.0-alpha.3-x86_64-unknown-linux-musl/mayi /usr/local/bin/
+```
 
 ### Android (Obtainium)
 
-1. On GitHub, create a fine-grained personal access token limited to the
-   repository `aminehmida/mayi`, with **Contents: Read-only**.
-2. In Obtainium, open Settings, find the GitHub source, and paste the token.
-3. Add an app with the URL `https://github.com/aminehmida/mayi`, and turn on
-   **Include prereleases**: alpha releases are marked as pre-releases.
+In [Obtainium](https://github.com/ImranR98/Obtainium), add an app with the URL
+`https://github.com/aminehmida/mayi` and turn on **Include prereleases**:
+alpha releases are marked as pre-releases. Or download the APK from the
+releases page.
 
-Every release is signed with the same key, so Obtainium can update the app in
-place. The app needs Android 12 or later and a phone that can keep keys in
-secure hardware.
+Every release is signed with the same key, so the app updates in place. It
+needs Android 12 or later and a phone that can keep keys in secure hardware.
 
 ### Making a release
 
