@@ -241,4 +241,12 @@ class ControllerTest {
         assertEquals("mac: up to date", phone.state.syncStatus)
         eventually("the Mac to learn the phone's secret") { mac.state.secrets.any { it.name == "FROM_PHONE" } }
     }
+
+    @Test
+    fun twoFactorCodesComeFromTheKeyNotTheScreen() {
+        val code = dev.mayi.ffi.twoFactorCode("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        assertEquals(6, code.code.length)
+        assertTrue(code.validSecs in 1uL..30uL)
+        assertTrue(runCatching { dev.mayi.ffi.twoFactorCode("not a key!") }.isFailure)
+    }
 }

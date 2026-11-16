@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Foundation
 import Security
@@ -226,19 +227,18 @@ import Testing
             draft.change(existing: storedLogin)
                 == .success(.rules(name: "github", allow: [], maxGrantSecs: 600, sites: ["github.com", "gist.github.com"])))
         draft.username = "amine"
-        #expect(draft.change(existing: storedLogin) == .failure("Enter the password."))
+        #expect(draft.change(existing: storedLogin) == .failure("Show the login's values to change them."))
         draft.username = ""
         draft.level = 4
         #expect(
             draft.change(existing: storedLogin)
-                == .failure("Changing the level re-encrypts the login, so enter its password again."))
+                == .failure("Changing the level re-encrypts the login, so show its values first."))
     }
 
     @Test func shownValuesSavedUnchangedChangeOnlyRules() {
         var draft = SecretDraft(editing: stored)
         draft.show(RevealedSecret(
-            fields: [RevealedField(name: "user", value: "admin"), RevealedField(name: "password", value: "pw")],
-            code: nil, codeValidSecs: 0))
+            fields: [RevealedField(name: "user", value: "admin"), RevealedField(name: "password", value: "pw")]))
         #expect(draft.fields.map(\.value) == ["admin", "pw"])
         draft.allowText = "psql *\npg_dump *"
         #expect(
@@ -254,23 +254,48 @@ import Testing
                         allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, login: false, sites: [])))
     }
 
-    @Test func aShownLoginFillsItsFields() {
+    @Test func aShownLoginKeepsItsTwoFactorKeyOutOfSight() {
         var draft = SecretDraft(editing: storedLogin)
         draft.show(RevealedSecret(
             fields: [
                 RevealedField(name: "password", value: "pw"), RevealedField(name: "totp", value: "JBSWY3DPEHPK3PXP"),
                 RevealedField(name: "username", value: "amine"),
-            ],
-            code: "123456", codeValidSecs: 12))
-        #expect((draft.username, draft.password, draft.twoFactorKey) == ("amine", "pw", "JBSWY3DPEHPK3PXP"))
+            ]))
+        #expect((draft.username, draft.password, draft.twoFactorKey) == ("amine", "pw", ""), "the key is never shown")
+        #expect(draft.effectiveTwoFactorKey == "JBSWY3DPEHPK3PXP", "but it is kept")
         #expect(
             draft.change(existing: storedLogin)
                 == .success(.rules(name: "github", allow: [], maxGrantSecs: 600, sites: ["github.com"])))
-        draft.password = "new"
-        guard case .success(.put(_, _, let values, _, _, _, _)) = draft.change(existing: storedLogin) else {
-            Issue.record("expected a put")
-            return
+        func values(_ draft: SecretDraft) -> [String: String]? {
+            guard case .success(.put(_, _, let values, _, _, _, _)) = draft.change(existing: storedLogin) else { return nil }
+            return values
         }
-        #expect(values == ["username": "amine", "password": "new", "totp": "JBSWY3DPEHPK3PXP"])
+        draft.password = "new"
+        #expect(values(draft) == ["username": "amine", "password": "new", "totp": "JBSWY3DPEHPK3PXP"])
+        draft.twoFactorKey = " GEZDGNBVGY3TQOJQ "
+        #expect(values(draft)?["totp"] == "GEZDGNBVGY3TQOJQ", "a new key replaces it")
+        draft.twoFactorKey = ""
+        draft.removeTwoFactor = true
+        #expect(values(draft) == ["username": "amine", "password": "new"], "or it is removed")
+    }
+
+    @Test func twoFactorCodesComeFromTheKey() throws {
+        let code = try twoFactorCode(key: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        #expect(code.code.count == 6 && code.code.allSatisfy(\.isNumber))
+        #expect((1...30).contains(code.validSecs))
+        #expect(throws: MayiError.self) { _ = try twoFactorCode(key: "not a key!") }
+        #expect(TwoFactorCodeRow.grouped("123456") == "123 456")
+        #expect(TwoFactorCodeRow.grouped("12345678") == "1234 5678")
+    }
+
+    @Test func aCopiedQRCodeIsRead() throws {
+        let board = NSPasteboard(name: .init("mayi-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        #expect(qrCode(on: board) == nil)
+        let link = "otpauth://totp/GitHub:amine?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+        board.clearContents()
+        let image: NSImage? = qrCode(link)
+        board.writeObjects([try #require(image)])
+        #expect(qrCode(on: board) == link)
     }
 }

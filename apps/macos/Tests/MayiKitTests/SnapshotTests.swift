@@ -49,6 +49,17 @@ import Testing
         try await snapshot(
             SecretEditor(existing: nil, draft: draft, onSave: { _ in nil }, onCancel: {}), name: "login-editor",
             dark: false)
+        let stored = SecretRecord(
+            name: "github", level: 3, fields: ["password", "totp", "username"], allow: [], maxGrantSecs: 600,
+            version: 1, login: true, sites: ["github.com"], copies: 2)
+        var shown = SecretDraft(editing: stored)
+        shown.show(RevealedSecret(fields: [
+            RevealedField(name: "password", value: "correct horse"), RevealedField(name: "totp", value: "JBSWY3DPEHPK3PXP"),
+            RevealedField(name: "username", value: "amine"),
+        ]))
+        try await snapshot(
+            SecretEditor(existing: stored, draft: shown, onSave: { _ in nil }, onCancel: {}), name: "login-shown",
+            dark: false)
     }
 
     @Test func notices() async throws {
@@ -73,8 +84,7 @@ import Testing
             name: "editor", dark: false)
         var shown = SecretDraft(editing: stored)
         shown.show(RevealedSecret(
-            fields: [RevealedField(name: "password", value: "s3cr3t-pa55"), RevealedField(name: "user", value: "app")],
-            code: nil, codeValidSecs: 0))
+            fields: [RevealedField(name: "password", value: "s3cr3t-pa55"), RevealedField(name: "user", value: "app")]))
         try await snapshot(
             SecretEditor(existing: stored, draft: shown, onSave: { _ in nil }, onCancel: {}),
             name: "editor-shown", dark: false)

@@ -56,6 +56,7 @@ import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Card
@@ -94,6 +95,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -118,6 +120,7 @@ import dev.mayi.ffi.JoinInvitation
 import dev.mayi.ffi.PromptInfo
 import dev.mayi.ffi.RevealedSecret
 import dev.mayi.ffi.SecretRecord
+import dev.mayi.ffi.twoFactorCode
 import java.text.DateFormat
 import java.util.Calendar
 import java.util.Date
@@ -949,8 +952,8 @@ private fun AddSecret(
     /** The stored values, once shown: saving them unchanged changes only the rules. */
     var shown by remember { mutableStateOf<Map<String, String>?>(null) }
     val fieldValues = remember { mutableStateMapOf<String, String>() }
-    /** A login's current two-factor code, and until when it is valid. */
-    var code by remember { mutableStateOf<Pair<String, Long>?>(null) }
+    /** Drop the stored two-factor key on saving. */
+    var removeTwoFactor by remember { mutableStateOf(false) }
     var revealing by remember { mutableStateOf(false) }
     fun showValues() {
         val decrypt = reveal ?: return
@@ -961,10 +964,11 @@ private fun AddSecret(
             result.onSuccess { revealed ->
                 val values = revealed.fields.associate { it.name to it.value }
                 when {
+                    // The two-factor key stays out of its field: the sheet
+                    // shows the code it gives instead.
                     existing?.login == true -> {
                         username = values["username"] ?: ""
                         password = values["password"] ?: ""
-                        twoFactor = values["totp"] ?: ""
                     }
                     severalFields -> {
                         fieldValues.clear()
@@ -972,29 +976,55 @@ private fun AddSecret(
                     }
                     else -> value = values["value"] ?: ""
                 }
-                code = revealed.code?.let { it to System.currentTimeMillis() + revealed.codeValidSecs.toLong() * 1000 }
                 shown = values
             }.onFailure { error = MayiController.describe(it) }
         }
     }
     LaunchedEffect(Unit) { if (revealOnOpen) showValues() }
     val keep = if (editing && shown == null) "unchanged" else null
+    val storedKey = shown?.get("totp")?.takeIf { !removeTwoFactor }
+    /** The two-factor key saving keeps: a new one typed, else the stored one. */
+    val twoFactorKey = twoFactor.trim().ifEmpty { null } ?: storedKey
     val copy = @Composable { text: String ->
         IconButton(onClick = { copySecret(context, text) }, enabled = text.isNotEmpty()) {
             Icon(Icons.Outlined.ContentCopy, contentDescription = "Copy")
         }
     }
-    val secretField = @Composable { text: String, set: (String) -> Unit, label: String, trailing: (@Composable () -> Unit)? ->
-        // Hidden while typing a new value; readable, with a copy button, once shown.
-        val visible = shown != null
-        OutlinedTextField(
-            text, set, Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true,
-            placeholder = keep?.let { hint -> { Text(hint) } },
-            visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
-            textStyle = if (visible) mono else MaterialTheme.typography.bodyLarge,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            trailingIcon = if (visible) ({ copy(text) }) else trailing,
-        )
+    /**
+     * A value field: hidden while typing, with an eye to check what was typed;
+     * readable, with a copy button, once the stored values are shown, unless
+     * [private] (a two-factor key, which is never shown).
+     */
+    @Composable
+    fun SecretField(
+        text: String, set: (String) -> Unit, label: String, hint: String? = keep, private: Boolean = false,
+        trailing: (@Composable () -> Unit)? = null,
+    ) {
+        key(label) {
+            var peek by remember { mutableStateOf(false) }
+            val stored = shown != null && !private
+            val visible = stored || peek
+            OutlinedTextField(
+                text, set, Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true,
+                placeholder = hint?.let { { Text(it) } },
+                visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
+                textStyle = if (visible) mono else MaterialTheme.typography.bodyLarge,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                trailingIcon = if (stored) ({ copy(text) }) else {
+                    {
+                        Row {
+                            trailing?.invoke()
+                            IconButton(onClick = { peek = !peek }) {
+                                Icon(
+                                    if (peek) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                                    contentDescription = if (peek) "Hide what you typed" else "Show what you typed",
+                                )
+                            }
+                        }
+                    }
+                },
+            )
+        }
     }
     val showButton = @Composable {
         if (editing && reveal != null && shown == null) {
@@ -1038,23 +1068,33 @@ private fun AddSecret(
                 placeholder = { Text("github.com") }, textStyle = mono, minLines = 1,
                 supportingText = { Text("As the address bar shows them. *.example.com covers its subdomains. Typed into these sites only, over https.") },
             )
-            OutlinedTextField(
-                username, { username = it }, Modifier.fillMaxWidth(), label = { Text("Username (optional)") }, singleLine = true,
-                placeholder = keep?.let { hint -> { Text(hint) } },
-                trailingIcon = if (shown != null) ({ copy(username) }) else null,
-            )
-            secretField(password, { password = it }, "Password", null)
-            secretField(twoFactor, { twoFactor = it }, "Two-factor key (optional)") {
-                IconButton(onClick = { scan { twoFactor = it } }) {
-                    Icon(Icons.Outlined.QrCodeScanner, contentDescription = "Scan the site’s QR code")
+            // A stored login is changed only once shown, so that what is not
+            // retyped is kept.
+            if (editing && shown == null) {
+                showButton()
+            } else {
+                OutlinedTextField(
+                    username, { username = it }, Modifier.fillMaxWidth(), label = { Text("Username (optional)") }, singleLine = true,
+                    trailingIcon = if (shown != null) ({ copy(username) }) else null,
+                )
+                SecretField(password, { password = it }, "Password", hint = null)
+                twoFactorKey?.let { TwoFactorCodeRow(it, copy) }
+                SecretField(
+                    twoFactor, { twoFactor = it }, if (storedKey != null) "New two-factor key" else "Two-factor key (optional)",
+                    hint = if (storedKey != null) "unchanged" else null, private = true,
+                ) {
+                    IconButton(onClick = { scan { twoFactor = it } }) {
+                        Icon(Icons.Outlined.QrCodeScanner, contentDescription = "Scan the site’s QR code")
+                    }
+                }
+                if (storedKey != null && twoFactor.isEmpty()) {
+                    TextButton(onClick = { removeTwoFactor = true }) { Text("Remove two-factor key", color = scheme.error) }
                 }
             }
-            code?.let { (current, until) -> CurrentCode(current, until, copy, onExpired = ::showValues) }
-            showButton()
             Text(
                 when {
-                    shown != null -> shownHint
-                    editing -> "Leave all three empty to keep what is stored, or show them to read and edit them. Changing the level needs the password again."
+                    shown != null -> "The code is what the site asks for now; the key behind it is never shown. To replace the key, scan its QR code or paste a new one. Copied values are cleared from the clipboard after a minute."
+                    editing -> "Show the values to read or change them. Changing the level needs them too."
                     else -> "The two-factor key is what a site shows when you turn on an authenticator app: scan its QR code, or paste the key. It stays on your devices; a page only ever gets the current code."
                 },
                 style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
@@ -1068,12 +1108,12 @@ private fun AddSecret(
                 showButton()
             } else {
                 for (field in existing?.fields.orEmpty()) {
-                    secretField(fieldValues[field] ?: "", { fieldValues[field] = it }, field, null)
+                    SecretField(fieldValues[field] ?: "", { fieldValues[field] = it }, field)
                 }
                 Text(shownHint, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
             }
         } else {
-            secretField(value, { value = it }, "Value", null)
+            SecretField(value, { value = it }, "Value")
             showButton()
             if (editing) {
                 Text(
@@ -1135,7 +1175,7 @@ private fun AddSecret(
                         login -> buildMap {
                             put("password", password)
                             if (username.isNotBlank()) put("username", username.trim())
-                            if (twoFactor.isNotBlank()) put("totp", twoFactor.trim())
+                            twoFactorKey?.let { put("totp", it) }
                         }
                         severalFields && shown == null -> emptyMap()
                         severalFields -> fieldValues.toMap()
@@ -1151,7 +1191,8 @@ private fun AddSecret(
                         severalFields && values.values.any { it.isEmpty() } -> "Enter a value for every field."
                         !editing && values.isEmpty() -> "Enter the value."
                         editing && values.isEmpty() && level != existing?.level?.toInt() ->
-                            "Changing the level re-encrypts it, so enter its " + (if (login) "password" else "value") + " again."
+                            if (login) "Changing the level re-encrypts it, so show its values first."
+                            else "Changing the level re-encrypts it, so show or enter its value again."
                         else -> onSave(
                             NewSecret(
                                 name.trim(), level.toUByte(), values, if (login) emptyList() else lines(allow), maxGrant, login,
@@ -1165,29 +1206,32 @@ private fun AddSecret(
     }
 }
 
-/** A login's two-factor code, counting down; once expired, a way to show the next one. */
+/** "123456" as "123 456", as authenticator apps show it. */
+private fun grouped(code: String) = if (code.length > 4) code.substring(0, code.length / 2) + " " + code.substring(code.length / 2) else code
+
+/** The code a two-factor key gives now, kept current, with a copy button. */
 @Composable
-private fun CurrentCode(current: String, until: Long, copy: @Composable (String) -> Unit, onExpired: () -> Unit) {
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(until) {
-        while (now < until) {
+private fun TwoFactorCodeRow(key: String, copy: @Composable (String) -> Unit) {
+    var tick by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(key) {
+        while (true) {
             kotlinx.coroutines.delay(1000)
-            now = System.currentTimeMillis()
+            tick++
         }
     }
-    val left = ((until - now + 999) / 1000).toInt()
-    if (left > 0) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Code now", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-            Text(current, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace)
-            Text(
-                "  for $left s", style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            copy(current)
-        }
-    } else {
-        TextButton(onClick = onExpired) { Text("Show the next code") }
+    val current = remember(key, tick) { runCatching { twoFactorCode(key) }.getOrNull() }
+    if (current == null) {
+        Text("Not a two-factor key", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Two-factor code", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Text(grouped(current.code), style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Monospace)
+        Text(
+            "  ${current.validSecs} s", style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        copy(current.code)
     }
 }
 

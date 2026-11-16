@@ -38,8 +38,11 @@ public struct SecretDraft: Equatable {
     // A login's fields.
     public var username = ""
     public var password = ""
-    /// The setup key or `otpauth://` link a site shows when two-factor is turned on.
+    /// A new setup key or `otpauth://` link, as a site shows when two-factor
+    /// is turned on. Empty keeps the stored one, which is never shown.
     public var twoFactorKey = ""
+    /// Drop the stored two-factor key on saving.
+    public var removeTwoFactor = false
     /// One website per line.
     public var sitesText = ""
     /// The stored values, once shown to the owner: saving them unchanged
@@ -58,7 +61,9 @@ public struct SecretDraft: Equatable {
         maxGrantMinutes = Int(secret.maxGrantSecs / 60)
     }
 
-    /// Fills the fields with the stored values, so they can be read and edited.
+    /// Fills the fields with the stored values, so they can be read and
+    /// edited. A login's two-factor key stays out of its field: the editor
+    /// shows the code it gives instead.
     public mutating func show(_ revealed: RevealedSecret) {
         var values: [String: String] = [:]
         for field in revealed.fields { values[field.name] = field.value }
@@ -66,7 +71,7 @@ public struct SecretDraft: Equatable {
         if login {
             username = values["username"] ?? ""
             password = values["password"] ?? ""
-            twoFactorKey = values["totp"] ?? ""
+            twoFactorKey = ""
         } else {
             fields = revealed.fields.map { Field(name: $0.name, value: $0.value) }
         }
@@ -74,6 +79,13 @@ public struct SecretDraft: Equatable {
 
     private static func lines(_ text: String) -> [String] {
         text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// The two-factor key saving would keep: a new one typed, else the stored one.
+    public var effectiveTwoFactorKey: String? {
+        let typed = twoFactorKey.trimmingCharacters(in: .whitespaces)
+        if !typed.isEmpty { return typed }
+        return removeTwoFactor ? nil : shown?["totp"]
     }
 
     var allow: [String] { Self.lines(allowText) }
@@ -114,10 +126,14 @@ public struct SecretDraft: Equatable {
 
     private func loginChange(name: String, existing: SecretRecord?, maxGrantSecs: UInt64) -> Result<Change, DraftError> {
         if sites.isEmpty { return .failure("Add the website this login is for.") }
-        let entered = [username, password, twoFactorKey].contains { !$0.isEmpty }
-        if let existing, !entered {
+        // A stored login's values change only once shown, so that whatever is
+        // not retyped is kept rather than dropped.
+        if let existing, shown == nil {
+            if [username, password, twoFactorKey].contains(where: { !$0.isEmpty }) {
+                return .failure("Show the login's values to change them.")
+            }
             if level != existing.level {
-                return .failure("Changing the level re-encrypts the login, so enter its password again.")
+                return .failure("Changing the level re-encrypts the login, so show its values first.")
             }
             return .success(.rules(name: name, allow: [], maxGrantSecs: maxGrantSecs, sites: sites))
         }
@@ -125,8 +141,7 @@ public struct SecretDraft: Equatable {
         var values = ["password": password]
         let user = username.trimmingCharacters(in: .whitespaces)
         if !user.isEmpty { values["username"] = user }
-        let key = twoFactorKey.trimmingCharacters(in: .whitespaces)
-        if !key.isEmpty { values["totp"] = key }
+        if let key = effectiveTwoFactorKey { values["totp"] = key }
         if let existing, values == shown, level == existing.level {
             return .success(.rules(name: name, allow: [], maxGrantSecs: maxGrantSecs, sites: sites))
         }

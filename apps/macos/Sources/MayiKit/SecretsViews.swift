@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import SwiftUI
 
 public struct SecretEditor: View {
@@ -13,8 +14,6 @@ public struct SecretEditor: View {
     @State var draft: SecretDraft
     @State var error: String?
     @State private var revealing = false
-    /// A login's current two-factor code, and when it stops being valid.
-    @State private var code: (value: String, until: Date)?
 
     public init(
         existing: SecretRecord?, draft: SecretDraft? = nil, error: String? = nil,
@@ -39,7 +38,6 @@ public struct SecretEditor: View {
         switch await onReveal() {
         case .success(let revealed):
             draft.show(revealed)
-            code = revealed.code.map { ($0, Date().addingTimeInterval(TimeInterval(revealed.codeValidSecs))) }
         case .failure(let problem):
             error = problem.message
         }
@@ -58,7 +56,8 @@ public struct SecretEditor: View {
         }
     }
 
-    /// A value field: hidden while typing a new one, readable once shown.
+    /// A value field: hidden while typing, with an eye to check what was
+    /// typed; readable, with a copy button, once the stored values are shown.
     @ViewBuilder private func valueField(_ title: String, _ text: Binding<String>, prompt: String?) -> some View {
         if shown {
             HStack {
@@ -67,7 +66,7 @@ public struct SecretEditor: View {
                 CopyButton(value: text.wrappedValue)
             }
         } else {
-            SecureField(title, text: text, prompt: prompt.map { Text($0) })
+            PeekField(title: title, text: text, prompt: prompt)
         }
     }
 
@@ -151,38 +150,51 @@ public struct SecretEditor: View {
         }
 
         Section {
-            HStack {
-                TextField("Username", text: $draft.username, prompt: Text(keep ?? "optional"))
-                if shown { CopyButton(value: draft.username) }
-            }
-            valueField("Password", $draft.password, prompt: keep ?? "required")
-            valueField("Two-Factor Key", $draft.twoFactorKey, prompt: keep ?? "optional")
-            if let code {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let left = Int(code.until.timeIntervalSince(context.date).rounded(.up))
-                    if left > 0 {
-                        HStack {
-                            Text("Code now")
-                            Spacer()
-                            Text(code.value).font(.system(.body, design: .monospaced))
-                            Text("for \(left) s").foregroundStyle(.secondary).monospacedDigit()
-                            CopyButton(value: code.value)
+            if existing != nil && !shown {
+                // A stored login is changed only once shown, so that what is
+                // not retyped is kept.
+                showValues
+            } else {
+                HStack {
+                    TextField("Username", text: $draft.username, prompt: Text("optional"))
+                    if shown { CopyButton(value: draft.username) }
+                }
+                valueField("Password", $draft.password, prompt: "required")
+                if let key = draft.effectiveTwoFactorKey {
+                    TwoFactorCodeRow(key: key)
+                }
+                HStack {
+                    PeekField(
+                        title: draft.shown?["totp"] == nil ? "Two-Factor Key" : "New Two-Factor Key",
+                        text: $draft.twoFactorKey,
+                        prompt: draft.shown?["totp"] != nil && !draft.removeTwoFactor ? "unchanged" : "optional")
+                    Button {
+                        if let text = qrCode(on: .general) {
+                            draft.twoFactorKey = text
+                            error = nil
+                        } else {
+                            error = "No QR code on the clipboard. Press Control-Shift-Command-4, select the QR code, then paste it."
                         }
-                    } else {
-                        Button("Show the Next Code") { Task { await reveal() } }
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
                     }
+                    .buttonStyle(.borderless)
+                    .help("Paste a QR code you copied: press Control-Shift-Command-4 and select it")
+                }
+                if draft.shown?["totp"] != nil, !draft.removeTwoFactor, draft.twoFactorKey.isEmpty {
+                    Button("Remove Two-Factor Key", role: .destructive) { draft.removeTwoFactor = true }
+                        .buttonStyle(.borderless)
                 }
             }
-            showValues
         } header: {
             Text("Sign-In")
         } footer: {
             Text(
                 existing == nil
-                    ? "The two-factor key is the setup key or otpauth:// link a site shows when you turn on an authenticator app. It stays on your devices: a page only ever gets the current code."
+                    ? "The two-factor key is the setup key or otpauth:// link a site shows when you turn on an authenticator app; or copy its QR code and paste it with the QR button. It stays on your devices: a page only ever gets the current code."
                     : shown
-                        ? "Edit what you need and save. Copied values are cleared from the clipboard after a minute."
-                        : "Leave all three empty to keep what is stored, or show them to read and edit them. Changing the level needs the password again."
+                        ? "The code is what the site asks for now; the key behind it is never shown. To replace the key, type or paste a new one, or paste its QR code. Copied values are cleared from the clipboard after a minute."
+                        : "Show the values to read or change them. Changing the level needs them too."
             )
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -297,6 +309,70 @@ struct SecretRow: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// The code a two-factor key gives now, kept current, with a copy button.
+struct TwoFactorCodeRow: View {
+    let key: String
+
+    /// "123456" as "123 456", as authenticator apps show it.
+    static func grouped(_ code: String) -> String {
+        guard code.count > 4 else { return code }
+        let half = code.index(code.startIndex, offsetBy: code.count / 2)
+        return code[..<half] + " " + code[half...]
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            if let current = try? twoFactorCode(key: key) {
+                HStack {
+                    Text("Two-Factor Code")
+                    Spacer()
+                    Text(Self.grouped(current.code)).font(.system(.title3, design: .monospaced))
+                    Text("\(current.validSecs) s").foregroundStyle(.secondary).monospacedDigit()
+                    CopyButton(value: current.code)
+                }
+            } else {
+                Text("Not a two-factor key").foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// The text of a QR code in an image on `pasteboard`, if there is one.
+func qrCode(on pasteboard: NSPasteboard) -> String? {
+    guard let image = NSImage(pasteboard: pasteboard), let data = image.tiffRepresentation,
+        let picture = CIImage(data: data)
+    else { return nil }
+    let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])
+    return detector?.features(in: picture).compactMap { ($0 as? CIQRCodeFeature)?.messageString }.first
+}
+
+/// A hidden field with an eye button that shows what was typed into it.
+struct PeekField: View {
+    let title: String
+    @Binding var text: String
+    let prompt: String?
+    @State private var visible = false
+
+    var body: some View {
+        HStack {
+            if visible {
+                TextField(title, text: $text, prompt: prompt.map { Text($0) })
+                    .font(.system(.body, design: .monospaced))
+            } else {
+                SecureField(title, text: $text, prompt: prompt.map { Text($0) })
+            }
+            Button {
+                visible.toggle()
+            } label: {
+                Image(systemName: visible ? "eye.slash" : "eye")
+            }
+            .buttonStyle(.borderless)
+            .help(visible ? "Hide what you typed" : "Show what you typed")
+            .accessibilityLabel(visible ? "Hide" : "Show")
+        }
     }
 }
 

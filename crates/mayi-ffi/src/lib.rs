@@ -299,14 +299,31 @@ pub struct RevealedField {
     pub value: String,
 }
 
-/// A secret's values, to show its owner in the app.
+/// A secret's values, to show its owner in the app. A login's `totp` field
+/// is its two-factor key: show the code [`two_factor_code`] gives instead.
 #[derive(Clone, uniffi::Record)]
 pub struct RevealedSecret {
     pub fields: Vec<RevealedField>,
-    /// For a login with a two-factor key: the code valid now, and for how
-    /// many more seconds.
-    pub code: Option<String>,
-    pub code_valid_secs: u64,
+}
+
+/// A two-factor code and how many more seconds it is valid.
+#[derive(Clone, uniffi::Record)]
+pub struct TwoFactorCode {
+    pub code: String,
+    pub valid_secs: u64,
+}
+
+/// The code a two-factor key (or `otpauth://` link) gives now, so the apps
+/// can show the code rather than the key, and keep it current without
+/// decrypting again. Fails if the key is not one.
+#[uniffi::export]
+pub fn two_factor_code(key: String) -> Result<TwoFactorCode, MayiError> {
+    let totp = mayi_core::totp::Totp::parse(&key).map_err(|detail| MayiError::Failed { detail })?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok(TwoFactorCode { code: totp.code(now).to_string(), valid_secs: totp.valid_for(now) })
 }
 
 impl From<ItemMeta> for SecretRecord {
@@ -659,21 +676,12 @@ impl VaultDevice {
     /// biometric check that unlocks it, showing `prompt`. Logged as viewed.
     pub fn reveal_secret(&self, name: String, prompt: String) -> Result<RevealedSecret, MayiError> {
         let (meta, values) = self.vault().view(&name, &prompt)?;
-        let fields: Vec<RevealedField> = meta
+        let fields = meta
             .fields
             .iter()
             .filter_map(|f| values.get(f).map(|v| RevealedField { name: f.clone(), value: v.to_string() }))
             .collect();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let totp = values.get(mayi_proto::FIELD_TOTP).and_then(|key| mayi_core::totp::Totp::parse(key).ok());
-        Ok(RevealedSecret {
-            fields,
-            code: totp.as_ref().map(|t| t.code(now).to_string()),
-            code_valid_secs: totp.map(|t| t.valid_for(now)).unwrap_or(0),
-        })
+        Ok(RevealedSecret { fields })
     }
 
     /// Creates a secret or replaces the one with the same name. A login

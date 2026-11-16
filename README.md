@@ -109,7 +109,10 @@ changed fingerprints make unusable, until its vault is set up again.
 
 To read a secret yourself, select it and choose Show Values: after Touch ID
 or your password, its values appear in the editor, where you can change them
-or copy one (the clipboard is cleared after a minute). Each view is listed in
+or copy one (the clipboard is cleared after a minute). A login shows its
+current two-factor code, never the key behind it; to replace the key, type or
+paste a new one, or copy its QR code (Control-Shift-Command-4) and paste it
+with the QR button. The phone scans it with the camera. Each view is listed in
 Activity. An orange dot next to a secret means it is only on this Mac: it
 gets a second copy when another of your devices syncs.
 
