@@ -105,15 +105,15 @@ cask "mayi" do
   homepage "https://github.com/{REPO}"
 
   depends_on arch: :arm64
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "Mayi.app"
   binary "#{{appdir}}/Mayi.app/Contents/Resources/mayi"
 
   # The app is signed ad hoc, not by an Apple developer account, so macOS
   # would refuse to open a downloaded copy. It is your own build.
-  postflight do
-    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{{appdir}}/Mayi.app"]
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{{{appdir}}}}/Mayi.app"], must_succeed: false
   end
 
   caveats <<~EOS
