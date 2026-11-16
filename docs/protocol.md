@@ -156,8 +156,17 @@ A vault can live on more than one device. There is no server between them.
 ### Finding devices
 
 Each device publishes, in its own record in the vault, its tunnel key, port
-and network addresses. Records sync like everything else, so every device
-knows where the others were last seen.
+and network addresses, leaving out those of virtual machine and container
+networks. It publishes them again whenever its network changes (a new
+Wi-Fi, Ethernet, a VPN coming up) and before each sync. Records sync like
+everything else, so every device knows where the others were last seen.
+
+To reach a device, a requester or another device tries all its addresses at
+once: the one that worked last first, each other 250 ms later. The first to
+complete the handshake is kept and the others are dropped, so at home the
+local network usually wins, away a VPN such as Tailscale, and either may be
+down. One-time tokens (pairing, enrolment, joining) are tried one address at
+a time instead, so that a second handshake cannot reach the other side.
 
 A machine asks the device it reaches for `peers` at the start of every
 connection and stores the answer, so it learns about devices added after it
@@ -185,9 +194,11 @@ vault the requester can reach, each over its own connection:
    later is asked under the same rule, and at once if its owner is using it.
 4. The wait for a decision (`timeout`, 15 minutes by default) starts when the
    first `run` is sent. The first `released` or `denied` wins; the requester
-   closes every other connection, which takes their prompts down. An `error`
-   takes only that device out of the search. A device that closes its
-   connection before deciding is tried again.
+   closes every other connection, which takes their prompts down and logs
+   them as `withdrawn`. An `error` takes only that device out of the search.
+   A device that closes its connection before deciding, or answers `denied`
+   with a reason starting `withdrawn` (it dropped the request on its own), is
+   tried again.
 
 ### The requester on a vault device's machine
 

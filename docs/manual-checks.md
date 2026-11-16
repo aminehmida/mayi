@@ -11,25 +11,26 @@ Below, `mayi` is `apps/macos/build/Mayi.app/Contents/Resources/mayi`.
 
 ### Touch ID (needs the Touch ID keyboard connected)
 
-- [ ] Add a level 4 secret `PROD` in the app. No fingerprint is asked for.
-- [ ] `mayi run -s PROD -r test -- sh -c 'echo ${#PROD}'` shows the Touch ID
+- [x] Add a level 4 secret `PROD` in the app. No fingerprint is asked for.
+- [x] `mayi run -s PROD -r test -- sh -c 'echo ${#PROD}'` shows the Touch ID
       dialog with the command in its text, and prints the length after a touch.
-- [ ] The same command again within 5 minutes does not ask. A different
+- [x] The same command again within 5 minutes does not ask. A different
       command does.
-- [ ] Cancelling the dialog makes the command fail with exit code 77.
-- [ ] Two level 4 secrets in one command (`-s A -s B`) ask for one touch, not two.
-- [ ] With the keyboard disconnected, the request fails cleanly instead of hanging.
+- [x] Cancelling the dialog makes the command fail with exit code 77.
+- [x] Two level 4 secrets in one command (`-s A -s B`) ask for one touch, not two.
+- [x] With the keyboard disconnected, the request fails cleanly instead of hanging.
+      (Not applicable: the MacBook's Touch ID is built in.)
 
 ### Windows
 
-- [ ] A level 3 request shows the approval panel above other apps without
+- [x] A level 3 request shows the approval panel above other apps without
       taking keyboard focus: typing continues to go to the app you were in.
-- [ ] Each button works on the first click: Deny, Allow Once, and both
+- [x] Each button works on the first click: Deny, Allow Once, and both
       entries under Allow for This Session.
-- [ ] Pressing Return in another app does not answer the prompt.
-- [ ] A level 2 request shows a notice at the top right; Stop kills a
+- [x] Pressing Return in another app does not answer the prompt.
+- [x] A level 2 request shows a notice at the top right; Stop kills a
       long-running command (`-- sleep 30`) and the notice says it was stopped.
-- [ ] Secrets window: add, edit rules without re-entering values, replace
+- [x] Secrets window: add, edit rules without re-entering values, replace
       values, delete. The Activity tab lists what happened.
 - [ ] Quitting and reopening the app keeps the secrets.
 
@@ -160,9 +161,9 @@ secure hardware). Still to do by hand:
 - [ ] Back up the Android signing key `~/.android/mayi-release.jks` and its
       password (keychain item `mayi-android-release`). Losing either means
       the next release cannot update installed copies.
-- [ ] `brew tap` and `brew install --cask aminehmida/mayi/mayi`, then open
+- [x] `brew tap` and `brew install --cask aminehmida/mayi/mayi`, then open
       Mayi from Applications.
-- [ ] Obtainium on your phone: the repository URL, "Include prereleases",
+- [x] Obtainium on your phone: the repository URL, "Include prereleases",
       install, and later an update.
 
 ## Joining a vault from either side (v0.1.0-alpha.2)
@@ -228,8 +229,11 @@ connection holds the phone awake for 30 seconds; the camera scanner opens
 - [ ] After a day, Mayi's battery use in Settings, Battery is negligible.
 - [ ] On a Samsung or Xiaomi phone, if you have one: with Unrestricted set
       and the maker's own setting from dontkillmyapp.com, Mayi keeps serving.
-- [ ] An agent on the MacBook while you are away with the phone: the phone
+- [x] An agent on the MacBook while you are away with the phone: the phone
       asks; while you are typing on the Mac, only the Mac asks.
+- [ ] Answering from a phone whose screen was off: pulling down the
+      notification used to drop the request on both devices (found in
+      alpha.6, fixed in alpha.7); retest.
 - [ ] In Claude Code, a long `mayi run` started in the background with a
       75-minute timeout wakes the agent when you answer.
 
@@ -242,11 +246,14 @@ and saving shown values unchanged as a rules-only change. On the emulator the
 dot, the fingerprint prompt, the shown value with its copy button, and the
 "You viewed" entry in Activity were checked. Still to do by hand:
 
-- [ ] On the MacBook: Show Values asks for Touch ID (or your password) for a
+- [x] On the MacBook: Show Values asks for Touch ID (or your password) for a
       level 1 to 3 secret, and only the Secure Enclave prompt for level 4.
-- [ ] A copied value is gone from the clipboard a minute later, on the Mac
-      and on a real phone.
-- [ ] Add a secret on the Mac: its orange dot goes once the phone has synced,
+      (Found: on level 4 the eye needed a second press; fixed for alpha.7.)
+- [x] A copied value is gone from the clipboard a minute later, on the Mac
+      and on a real phone. (On Samsung phones it stays in Samsung's own
+      clipboard history, which One UI keeps outside any app's reach and which
+      ignores the sensitive flag; left as is, by your choice.)
+- [x] Add a secret on the Mac: its orange dot goes once the phone has synced,
       and the phone shows no dot for it.
 - [ ] Opening Mayi asks once (Touch ID or password on the MacBook, a
       fingerprint on the phone); after that, showing values and pairing ask

@@ -87,6 +87,9 @@ class MayiController(
     fun listen(port: UShort, addresses: List<String> = emptyList()): UShort =
         checkNotNull(device) { "the vault is not open" }.serveRemote(port, addresses)
 
+    /** Publishes where this phone is again; returns whether that changed. */
+    fun republish(): Boolean = runCatching { device?.republish() ?: false }.getOrDefault(false)
+
     // --- Called by the core, on its own threads ------------------------------
 
     override fun approve(prompt: PromptInfo): ApprovalChoice {
@@ -255,6 +258,8 @@ class MayiController(
     /** Syncs with the vault's other devices. Blocks; call off the main thread. */
     fun sync() {
         val device = device ?: return
+        // Where this phone is now goes out with the sync.
+        runCatching { device.republish() }
         val status = try {
             device.syncAll().joinToString("  ·  ") { r -> "${r.device}: ${r.error ?: "up to date"}" }
         } catch (e: MayiException) {

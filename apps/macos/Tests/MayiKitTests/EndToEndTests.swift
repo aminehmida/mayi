@@ -121,7 +121,7 @@ import Testing
         try await eventually { model.pending.count == 1 }
         process.terminate()
         try await eventually { model.pending.isEmpty }
-        try await eventually { model.log.last?.outcome == "denied: the requester went away" }
+        try await eventually { model.log.last?.outcome == "withdrawn" }
     }
 
     @Test func aPromptNobodyAnswersIsDenied() async throws {

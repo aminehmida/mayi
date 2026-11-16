@@ -18,6 +18,10 @@ use crate::{now_ms, Error};
 
 /// The machine a request came from. Unlike the fields of [`RunRequest`],
 /// this is established by the transport, not claimed by the requester.
+/// Why a run whose requester stopped waiting was not released: it was
+/// answered on another device, or the agent gave up.
+pub const WITHDRAWN: &str = "withdrawn: answered on another device, or the agent stopped waiting";
+
 #[derive(Clone, Debug)]
 pub struct Requester {
     pub id: String,
@@ -213,12 +217,15 @@ impl Broker {
             },
         );
         let mut result = self.decide_and_reveal(run_id, request, requester, &mut entry);
-        if lock(&self.withdrawn).remove(&run_id) {
+        let withdrawn = lock(&self.withdrawn).remove(&run_id);
+        if withdrawn {
             // Even if the user answered in the same instant, nobody is left
             // to receive the secret.
-            result = Err("the requester went away".into());
+            result = Err(WITHDRAWN.into());
         }
         entry.outcome = match &result {
+            // Not refused: answered on another device, or no longer waited for.
+            _ if withdrawn => "withdrawn".into(),
             Ok(_) => "released".into(),
             Err(reason) => format!("denied: {reason}"),
         };
@@ -752,12 +759,9 @@ mod tests {
         *lock(&f.ui.answer) = Some(GrantScope::SessionAny);
         let run_id = f.broker.reserve_run();
         f.broker.withdraw(run_id);
-        assert_eq!(
-            denied(f.broker.run_reserved(run_id, &request(&["L3"], "x", "s"), &local())),
-            "the requester went away"
-        );
+        assert_eq!(denied(f.broker.run_reserved(run_id, &request(&["L3"], "x", "s"), &local())), WITHDRAWN);
         let log = f.broker.vault().audit_tail(1).unwrap();
-        assert_eq!(log[0].outcome, "denied: the requester went away");
+        assert_eq!(log[0].outcome, "withdrawn");
     }
 
     #[test]

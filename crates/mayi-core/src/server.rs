@@ -95,6 +95,11 @@ fn clean_name(name: &str) -> String {
     if cleaned.is_empty() { "unnamed".to_string() } else { cleaned.to_string() }
 }
 
+/// Interfaces of virtual machines and containers (Parallels, VMware, the
+/// Apple virtualization bridge, Docker, libvirt), whose addresses only this
+/// machine's guests can reach.
+const VIRTUAL_INTERFACES: &[&str] = &["vnic", "vmnet", "bridge", "docker", "br-", "veth", "virbr"];
+
 /// This machine's IPv4 addresses that another machine could reach.
 pub fn local_addresses() -> Vec<String> {
     let mut addresses = Vec::new();
@@ -113,6 +118,13 @@ pub fn local_addresses() -> Vec<String> {
             let loopback = ifa.ifa_flags & libc::IFF_LOOPBACK as libc::c_uint != 0;
             if !up || loopback || ifa.ifa_addr.is_null() {
                 continue;
+            }
+            // Virtual machine and container networks: no other device is on them.
+            if !ifa.ifa_name.is_null() {
+                let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy();
+                if VIRTUAL_INTERFACES.iter().any(|prefix| name.starts_with(prefix)) {
+                    continue;
+                }
             }
             if i32::from((*ifa.ifa_addr).sa_family) == libc::AF_INET {
                 let addr = &*(ifa.ifa_addr as *const libc::sockaddr_in);
@@ -389,7 +401,12 @@ impl Server {
                 let mut byte = [0u8; 1];
                 while !decided.load(Ordering::SeqCst) {
                     match raw.read(&mut byte) {
-                        Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                        // A signal interrupting the read is not the requester leaving.
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                            ) => {}
                         _ => {
                             if !decided.load(Ordering::SeqCst) {
                                 self.broker.withdraw(run_id);
@@ -487,7 +504,32 @@ const ENROL_TIMEOUT: Duration = Duration::from_secs(120);
 
 type Tunnel = (noise::NoiseReader<TcpStream>, noise::NoiseWriter<TcpStream>);
 
-/// Opens a tunnel to another device, trying each of its addresses.
+/// Opens a tunnel to another device through one of its addresses.
+fn dial_one(
+    address: &str,
+    port: u16,
+    mode: u8,
+    private: &[u8; 32],
+    public: &[u8; 32],
+    psk: Option<&[u8; 32]>,
+    reply_timeout: Duration,
+) -> io::Result<Tunnel> {
+    use std::net::ToSocketAddrs;
+    let addr = (address, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "address did not resolve"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    let transport = noise::connect(&mut stream, mode, private, public, psk)?;
+    stream.set_read_timeout(Some(reply_timeout))?;
+    Ok(noise::split(transport, stream.try_clone()?, stream))
+}
+
+/// Opens a tunnel to another device, trying each of its addresses in turn.
+/// For one-time tokens: a second handshake with the same token must not
+/// reach the other side.
 fn dial(
     addresses: &[String],
     port: u16,
@@ -497,19 +539,37 @@ fn dial(
     psk: Option<&[u8; 32]>,
     reply_timeout: Duration,
 ) -> io::Result<Tunnel> {
-    use std::net::ToSocketAddrs;
     let mut last = io::Error::new(io::ErrorKind::NotFound, "no address known");
     for address in addresses {
-        let attempt = (address.as_str(), port).to_socket_addrs().and_then(|mut addrs| {
-            let addr = addrs.next().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "address did not resolve"))?;
-            let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
-            stream.set_nodelay(true)?;
-            stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-            let transport = noise::connect(&mut stream, mode, private, public, psk)?;
-            stream.set_read_timeout(Some(reply_timeout))?;
-            Ok(noise::split(transport, stream.try_clone()?, stream))
+        match dial_one(address, port, mode, private, public, psk, reply_timeout) {
+            Ok(tunnel) => return Ok(tunnel),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// How long each further address waits before it is tried too.
+const STAGGER: Duration = Duration::from_millis(250);
+
+/// Opens a device tunnel through whichever of the device's addresses
+/// answers first: all are tried, each a moment after the one before. At
+/// home the local network usually wins, away a VPN such as Tailscale, and
+/// either may be down. Tunnels that complete later are dropped.
+fn dial_device(addresses: &[String], port: u16, private: &[u8; 32], public: &[u8; 32]) -> io::Result<Tunnel> {
+    let (found, results) = std::sync::mpsc::channel();
+    for (i, address) in addresses.iter().cloned().enumerate() {
+        let (found, private, public) = (found.clone(), zeroize::Zeroizing::new(*private), *public);
+        thread::spawn(move || {
+            thread::sleep(STAGGER * i as u32);
+            let tunnel = dial_one(&address, port, MODE_DEVICE, &private, &public, None, Duration::from_secs(30));
+            let _ = found.send(tunnel);
         });
-        match attempt {
+    }
+    drop(found);
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no address known");
+    for result in results {
+        match result {
             Ok(tunnel) => return Ok(tunnel),
             Err(e) => last = e,
         }
@@ -524,8 +584,7 @@ fn sync_over(
     public: &[u8; 32],
 ) -> crate::Result<usize> {
     let (private, _) = vault.noise_keypair()?;
-    let (mut reader, mut writer) =
-        dial(addresses, port, MODE_DEVICE, &private, public, None, Duration::from_secs(30))?;
+    let (mut reader, mut writer) = dial_device(addresses, port, &private, public)?;
     let changed = sync::sync_as_caller(vault, &mut reader, &mut writer)?;
     vault.note_synced(public)?;
     Ok(changed)

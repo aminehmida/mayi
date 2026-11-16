@@ -646,6 +646,8 @@ struct ActivityRow: View {
     }()
 
     private var released: Bool { entry.outcome == "released" }
+    /// Answered on another device, or the agent stopped waiting: not refused.
+    private var withdrawn: Bool { entry.outcome == "withdrawn" }
 
     /// How a secret came to be released, in the user's terms.
     private static func how(_ via: String) -> String {
@@ -671,6 +673,8 @@ struct ActivityRow: View {
         case "request" where released:
             let ways = Set(entry.secrets.map { Self.how($0.via) })
             return "Released \(names)" + (ways.count == 1 ? " \(ways.first!)" : "")
+        case "request" where withdrawn:
+            return "Withdrawn: \(names)"
         case "request":
             return names.isEmpty ? "Request refused" : "Refused \(names)"
         case "stop":
@@ -688,14 +692,14 @@ struct ActivityRow: View {
 
     /// Why a request was refused, as a sentence.
     private var refusal: String? {
-        guard entry.event == "request", !released else { return nil }
+        guard entry.event == "request", !released, !withdrawn else { return nil }
         let why = entry.outcome.hasPrefix("denied: ") ? String(entry.outcome.dropFirst(8)) : entry.outcome
         return why.prefix(1).uppercased() + why.dropFirst() + "."
     }
 
     private var symbol: String {
         switch entry.event {
-        case "request": return released ? "key" : "xmark.circle"
+        case "request": return released ? "key" : withdrawn ? "arrow.uturn.backward.circle" : "xmark.circle"
         case "stop": return "stop.circle"
         case "view": return "eye"
         default: return "checkmark"
@@ -707,13 +711,19 @@ struct ActivityRow: View {
             Image(systemName: symbol)
                 .foregroundStyle(
                     (entry.event == "request" && released) || entry.event == "view"
-                        ? AnyShapeStyle(.primary) : entry.event == "exit" ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.red))
+                        ? AnyShapeStyle(.primary)
+                        : entry.event == "exit" || withdrawn ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.red))
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .foregroundStyle(entry.event == "exit" ? .secondary : .primary)
                 if let refusal {
                     Text(refusal).font(.callout).foregroundStyle(.red)
+                }
+                if withdrawn {
+                    Text("Answered on another device, or the agent stopped waiting.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
                 if entry.event == "request" {
                     Text(signIn ? entry.site : entry.command)

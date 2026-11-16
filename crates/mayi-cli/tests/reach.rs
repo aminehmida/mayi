@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::net::TcpListener;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -31,10 +31,12 @@ struct Owner {
     answer: AtomicU8,
     active: AtomicBool,
     gone: Mutex<HashSet<u64>>,
+    last_run: AtomicU64,
 }
 
 impl Ui for Owner {
     fn approve(&self, prompt: &Prompt) -> Approval {
+        self.last_run.store(prompt.run_id, Ordering::SeqCst);
         self.asked.fetch_add(1, Ordering::SeqCst);
         loop {
             if self.gone.lock().unwrap().contains(&prompt.run_id) {
@@ -314,4 +316,21 @@ fn mcp_calls_report_progress_while_waiting() {
     assert!(result["result"]["content"][0]["text"].as_str().unwrap().contains("none of your devices could be reached"));
     drop(input);
     server.wait().unwrap();
+}
+
+/// A device that drops a request on its own (a phone whose wait was cut
+/// short as it woke) has not answered: it is asked again.
+#[test]
+fn a_device_that_drops_the_request_is_asked_again() {
+    let mut setup = setup();
+    setup.only_phone();
+    let phone = setup.start_phone();
+    let child = setup.run(&[]);
+    eventually("the phone is asked", Duration::from_secs(10), || phone.owner.asked.load(Ordering::SeqCst) == 1);
+    phone.server.broker().withdraw(phone.owner.last_run.load(Ordering::SeqCst));
+    eventually("the phone is asked again", Duration::from_secs(10), || phone.owner.asked.load(Ordering::SeqCst) == 2);
+    phone.owner.answer.store(ALLOW, Ordering::SeqCst);
+    let (code, out, err) = finish(child);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "released");
 }

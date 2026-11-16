@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import Network
 
 /// Where the app keeps its files. Overridable through the environment so
 /// tests and experiments never touch the real vault.
@@ -97,6 +98,8 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var unlocked = false
     private var syncTimer: Timer?
     private var lockWatchers: [NSObjectProtocol] = []
+    private var pathMonitor: NWPathMonitor?
+    private var networkSettled: DispatchWorkItem?
 
     /// How often to sync with the vault's other devices while running.
     public static let syncInterval: TimeInterval = 300
@@ -175,6 +178,7 @@ public final class AppModel: ObservableObject {
         if hasOtherDevices {
             syncNow()
         }
+        watchNetwork()
         syncTimer = Timer.scheduledTimer(withTimeInterval: Self.syncInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.syncNow() }
         }
@@ -325,6 +329,8 @@ public final class AppModel: ObservableObject {
     public func syncNow() {
         guard let device, hasOtherDevices else { return }
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            // Where this Mac is now goes out with the sync.
+            _ = try? device.republish()
             let summary: String
             do {
                 summary = try device.syncAll().map { result in
@@ -341,6 +347,31 @@ public final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Tells the other devices where this Mac is after a network change (a
+    /// new Wi-Fi, Ethernet, a VPN such as Tailscale coming up), once the
+    /// burst of changes has settled.
+    private func watchNetwork() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.networkChanged() } }
+        }
+        monitor.start(queue: .global(qos: .utility))
+        pathMonitor = monitor
+    }
+
+    private func networkChanged() {
+        networkSettled?.cancel()
+        let settled = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let device = self.device else { return }
+                if (try? device.republish()) == true { self.syncNow() }
+            }
+        }
+        networkSettled = settled
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: settled)
     }
 
     // MARK: Other machines

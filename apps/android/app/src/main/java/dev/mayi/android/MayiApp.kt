@@ -12,7 +12,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -199,6 +206,34 @@ class MayiApp : Application() {
     private fun publish() {
         controller.listen(PORT)
         Thread { controller.sync() }.start()
+        watchNetwork()
+    }
+
+    private val settle = Handler(Looper.getMainLooper())
+    private var watchingNetwork = false
+
+    /**
+     * Tells the other devices where this phone is after a network change (a
+     * new Wi-Fi, mobile data, a VPN such as Tailscale coming up), once the
+     * burst of changes has settled.
+     */
+    @Synchronized
+    private fun watchNetwork() {
+        if (watchingNetwork) return
+        watchingNetwork = true
+        val changed = Runnable { Thread { if (controller.republish()) controller.sync() }.start() }
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            private fun soon() {
+                settle.removeCallbacks(changed)
+                settle.postDelayed(changed, 2_000)
+            }
+            override fun onAvailable(network: Network) = soon()
+            override fun onLost(network: Network) = soon()
+            override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) = soon()
+        }
+        // VPNs included: a plain request leaves them out.
+        val everything = NetworkRequest.Builder().removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build()
+        getSystemService(ConnectivityManager::class.java).registerNetworkCallback(everything, callback)
     }
 
     /** Creates a new vault on this phone. Returns an error message on failure. */

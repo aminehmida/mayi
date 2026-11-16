@@ -139,40 +139,56 @@ fn open_local(path: &PathBuf) -> io::Result<Open> {
     })
 }
 
-/// Opens a session tunnel to a paired device, trying the address that worked
-/// last and then each announced one, and asks it for the vault's devices.
-fn open_remote(device: &Device, private: &[u8; 32]) -> io::Result<Open> {
+/// Opens a session tunnel to a paired device through one address, and asks
+/// it for the vault's devices.
+fn open_at(address: String, port: u16, private: &[u8; 32], device: &Device) -> io::Result<Open> {
     let public = device.public()?;
-    let mut last = io::Error::new(io::ErrorKind::NotFound, "no address known");
-    for (address, port) in device.candidates() {
-        let attempt = tcp_connect(&address, port).and_then(|mut stream| {
-            // Bound the handshake and the first exchange; afterwards the
-            // device may take minutes to decide.
-            stream.set_read_timeout(Some(CONNECT_TIMEOUT))?;
-            let closer = Closer::Tcp(stream.try_clone()?);
-            let transport = noise::connect(&mut stream, MODE_SESSION, private, &public, None)?;
-            let (mut reader, mut writer) = noise::split(transport, stream.try_clone()?, stream.try_clone()?);
-            write_frame(&mut writer, &ClientMsg::Peers)?;
-            let reply = match read_frame::<_, ServerMsg>(&mut reader)? {
-                Some(ServerMsg::Peers { devices, sender_active, .. }) => (devices, sender_active),
-                Some(ServerMsg::Error { message }) => return Err(io::Error::other(message)),
-                _ => return Err(io::Error::other("unexpected reply from the vault device")),
-            };
-            stream.set_read_timeout(None)?;
-            Ok((Channel { reader: Box::new(reader), writer: Box::new(writer) }, closer, reply))
+    let mut stream = tcp_connect(&address, port)?;
+    // Bound the handshake and the first exchange; afterwards the device may
+    // take minutes to decide.
+    stream.set_read_timeout(Some(CONNECT_TIMEOUT))?;
+    let closer = Closer::Tcp(stream.try_clone()?);
+    let transport = noise::connect(&mut stream, MODE_SESSION, private, &public, None)?;
+    let (mut reader, mut writer) = noise::split(transport, stream.try_clone()?, stream.try_clone()?);
+    write_frame(&mut writer, &ClientMsg::Peers)?;
+    let (peers, active) = match read_frame::<_, ServerMsg>(&mut reader)? {
+        Some(ServerMsg::Peers { devices, sender_active, .. }) => (devices, sender_active),
+        Some(ServerMsg::Error { message }) => return Err(io::Error::other(message)),
+        _ => return Err(io::Error::other("unexpected reply from the vault device")),
+    };
+    stream.set_read_timeout(None)?;
+    let shown = if address.contains(':') { format!("[{address}]") } else { address };
+    Ok(Open {
+        channel: Channel { reader: Box::new(reader), writer: Box::new(writer) },
+        closer,
+        peers,
+        sender: Some(device.public_key.clone()),
+        active,
+        address: Some(format!("{shown}:{port}")),
+    })
+}
+
+/// How long each further address waits before it is tried too.
+const STAGGER: Duration = Duration::from_millis(250);
+
+/// Opens a session tunnel to a paired device through whichever of its
+/// addresses answers first: the one that worked last at once, each other a
+/// moment later. At home the local network usually wins, away a VPN such as
+/// Tailscale, and either may be down. Tunnels that complete later are dropped.
+fn open_remote(device: &Device, private: &[u8; 32]) -> io::Result<Open> {
+    let (found, results) = mpsc::channel();
+    for (i, (address, port)) in device.candidates().into_iter().enumerate() {
+        let (found, device, private) = (found.clone(), device.clone(), zeroize::Zeroizing::new(*private));
+        thread::spawn(move || {
+            thread::sleep(STAGGER * i as u32);
+            let _ = found.send(open_at(address, port, &private, &device));
         });
-        match attempt {
-            Ok((channel, closer, (peers, active))) => {
-                let shown = if address.contains(':') { format!("[{address}]") } else { address };
-                return Ok(Open {
-                    channel,
-                    closer,
-                    peers,
-                    sender: Some(device.public_key.clone()),
-                    active,
-                    address: Some(format!("{shown}:{port}")),
-                });
-            }
+    }
+    drop(found);
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no address known");
+    for result in results {
+        match result {
+            Ok(open) => return Ok(open),
             Err(e) => last = e,
         }
     }
@@ -512,6 +528,12 @@ impl Search {
     }
 }
 
+/// Whether a denial is a device withdrawing on its own rather than an
+/// answer. Older devices said "the requester went away".
+fn withdrawn(reason: &str) -> bool {
+    reason.starts_with("withdrawn") || reason == "the requester went away"
+}
+
 /// The device that took a request and its decision. For a release, the
 /// connection stays open: `replies` carries a Stop, `writer` the exit.
 pub struct Answer {
@@ -550,6 +572,16 @@ pub fn ask(request: &RunRequest, remote_only: bool, wait: Duration, timeout: Dur
             Ok(Event::Unreached(idx, error)) => {
                 search.slots[idx].tried = true;
                 search.slots[idx].last_error = Some(error);
+            }
+            // A device that dropped the request on its own (it lost track of
+            // the connection, say while the phone slept) has not answered:
+            // ask it again rather than end the request.
+            Ok(Event::Reply(idx, Some(ServerMsg::Denied { reason }))) if withdrawn(&reason) => {
+                if let Some(conn) = search.slots[idx].conn.take() {
+                    conn.closer.close();
+                }
+                search.slots[idx].last_error = Some("dropped the request; asking again".into());
+                search.dial(idx);
             }
             Ok(Event::Reply(idx, Some(reply @ (ServerMsg::Released { .. } | ServerMsg::Denied { .. })))) => {
                 let conn = search.slots[idx].conn.take().expect("asked devices are connected");

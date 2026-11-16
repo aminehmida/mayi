@@ -217,7 +217,7 @@ fn hanging_up_withdraws_the_prompt() {
     drop(t);
     for _ in 0..400 {
         let log = device.server.broker().vault().audit_tail(1).unwrap();
-        if log.first().is_some_and(|e| e.outcome == "denied: the requester went away") {
+        if log.first().is_some_and(|e| e.outcome == "withdrawn") {
             return;
         }
         thread::sleep(Duration::from_millis(5));

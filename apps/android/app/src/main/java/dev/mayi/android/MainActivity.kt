@@ -36,6 +36,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.History
@@ -1663,6 +1664,8 @@ private fun Activity(log: List<AuditRecord>) {
             }
             items(entries) { entry ->
                 val released = entry.outcome == "released"
+                // Answered on another device, or the agent stopped waiting: not refused.
+                val withdrawn = entry.outcome == "withdrawn"
                 val request = entry.event == "request"
                 val names = entry.secrets.joinToString { it.name }
                 val signIn = entry.site.isNotEmpty()
@@ -1671,6 +1674,7 @@ private fun Activity(log: List<AuditRecord>) {
                         Icon(
                             when {
                                 request && released -> Icons.Outlined.Key
+                                request && withdrawn -> Icons.AutoMirrored.Outlined.Undo
                                 request -> Icons.Outlined.Cancel
                                 entry.event == "stop" -> Icons.Outlined.StopCircle
                                 entry.event == "view" -> Icons.Outlined.Visibility
@@ -1679,7 +1683,7 @@ private fun Activity(log: List<AuditRecord>) {
                             contentDescription = null,
                             tint = when {
                                 request && released || entry.event == "view" -> scheme.onSurface
-                                entry.event == "exit" -> scheme.outline
+                                entry.event == "exit" || withdrawn -> scheme.outline
                                 else -> scheme.error
                             },
                         )
@@ -1692,6 +1696,7 @@ private fun Activity(log: List<AuditRecord>) {
                                     (if (signIn) "Typed $names into ${host(entry.site)}" else "Released $names") +
                                         if (ways.size == 1) " ${ways.first()}" else ""
                                 }
+                                request && withdrawn -> "Withdrawn: $names"
                                 request -> if (names.isEmpty()) "Request refused" else "Refused $names"
                                 entry.event == "stop" -> if (signIn) "Sign-in stopped by you" else "Command stopped by you"
                                 entry.event == "view" -> "You viewed $names on this phone"
@@ -1705,7 +1710,9 @@ private fun Activity(log: List<AuditRecord>) {
                     supportingContent = if (!request) null else {
                         {
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                if (!released) {
+                                if (withdrawn) {
+                                    Text("Answered on another device, or the agent stopped waiting.", color = scheme.onSurfaceVariant)
+                                } else if (!released) {
                                     Text(entry.outcome.removePrefix("denied: ").replaceFirstChar { it.uppercase() } + ".", color = scheme.error)
                                 }
                                 Text(if (signIn) entry.site else entry.command, fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)

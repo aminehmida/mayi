@@ -72,6 +72,10 @@ public struct SecretDraft: Equatable {
             username = values["username"] ?? ""
             password = values["password"] ?? ""
             twoFactorKey = ""
+        } else if Set(fields.map(\.name)) == Set(values.keys) {
+            // Filled in place: the rows keep their identity, so an eye that
+            // asked for the values stays open once they arrive.
+            for index in fields.indices { fields[index].value = values[fields[index].name] ?? "" }
         } else {
             fields = revealed.fields.map { Field(name: $0.name, value: $0.value) }
         }

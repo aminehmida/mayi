@@ -481,6 +481,8 @@ pub struct VaultDevice {
     server: Arc<Server>,
     /// The TCP port paired machines connect to, once listening.
     remote_port: Mutex<Option<u16>>,
+    /// The addresses given to `serve_remote`; empty means this device's own.
+    advertised: Mutex<Vec<String>>,
 }
 
 #[uniffi::export]
@@ -502,7 +504,11 @@ impl VaultDevice {
             Vault::create(path, keys, &device_name)?
         };
         let broker = Broker::new(vault, Arc::new(UiAdapter(ui)), Rules::default());
-        Ok(Arc::new(Self { server: Server::new(broker), remote_port: Mutex::new(None) }))
+        Ok(Arc::new(Self {
+            server: Server::new(broker),
+            remote_port: Mutex::new(None),
+            advertised: Mutex::new(Vec::new()),
+        }))
     }
 
     /// Starts serving requesters on a unix socket. Returns once the socket
@@ -531,10 +537,21 @@ impl VaultDevice {
                 port
             }
         };
-        let addresses =
-            if addresses.is_empty() { mayi_core::server::local_addresses() } else { addresses };
-        self.server.announce(port, addresses)?;
+        drop(current);
+        *self.advertised.lock().unwrap_or_else(|e| e.into_inner()) = addresses;
+        self.republish()?;
         Ok(port)
+    }
+
+    /// Publishes where this device can be reached again, after a network
+    /// change: a new Wi-Fi, a VPN coming up. Returns whether the addresses
+    /// changed, in which case the other devices should be told by a sync.
+    /// Does nothing before `serve_remote`.
+    pub fn republish(&self) -> Result<bool, MayiError> {
+        let Some(port) = *self.remote_port.lock().unwrap_or_else(|e| e.into_inner()) else { return Ok(false) };
+        let given = self.advertised.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let addresses = if given.is_empty() { mayi_core::server::local_addresses() } else { given };
+        Ok(self.server.announce(port, addresses)?)
     }
 
     /// Opens an invitation for a new vault device and returns the token to

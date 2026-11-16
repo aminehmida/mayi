@@ -237,9 +237,11 @@ import Testing
 
     @Test func shownValuesSavedUnchangedChangeOnlyRules() {
         var draft = SecretDraft(editing: stored)
+        let rows = draft.fields.map(\.id)
         draft.show(RevealedSecret(
             fields: [RevealedField(name: "user", value: "admin"), RevealedField(name: "password", value: "pw")]))
         #expect(draft.fields.map(\.value) == ["admin", "pw"])
+        #expect(draft.fields.map(\.id) == rows, "rows keep their identity, so an open eye stays open")
         draft.allowText = "psql *\npg_dump *"
         #expect(
             draft.change(existing: stored)

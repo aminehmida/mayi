@@ -137,6 +137,13 @@ fn a_second_device_joins_syncs_and_serves_the_same_machines() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, "mac");
     assert!(results[0].1.is_ok(), "{:?}", results[0].1);
+    // The Mac finishes its side just after the phone's call returns.
+    for _ in 0..200 {
+        if mac.ui.synced.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
     assert!(mac.ui.synced.load(Ordering::SeqCst) >= 2, "the Mac learnt the new secret and the phone's address");
     assert!(mac.server.broker().vault().meta("FROM_PHONE").is_ok());
 
