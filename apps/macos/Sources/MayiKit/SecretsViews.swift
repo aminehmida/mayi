@@ -9,6 +9,9 @@ public struct SecretEditor: View {
     let onReveal: (() async -> Result<RevealedSecret, DraftError>)?
     /// Show the values as soon as the editor opens.
     let revealOnOpen: Bool
+    /// Load the values when the editor opens, hidden behind their eyes: set
+    /// when that asks nothing (Mayi is unlocked, the level is below 4).
+    let loadsAtOnce: Bool
     let onSave: (SecretDraft.Change) -> String?
     let onCancel: () -> Void
     @State var draft: SecretDraft
@@ -18,11 +21,13 @@ public struct SecretEditor: View {
     public init(
         existing: SecretRecord?, draft: SecretDraft? = nil, error: String? = nil,
         onReveal: (() async -> Result<RevealedSecret, DraftError>)? = nil, revealOnOpen: Bool = false,
+        loadsAtOnce: Bool = false,
         onSave: @escaping (SecretDraft.Change) -> String?, onCancel: @escaping () -> Void
     ) {
         self.existing = existing
         self.onReveal = onReveal
         self.revealOnOpen = revealOnOpen
+        self.loadsAtOnce = loadsAtOnce
         self.onSave = onSave
         self.onCancel = onCancel
         _draft = State(initialValue: draft ?? existing.map(SecretDraft.init(editing:)) ?? SecretDraft())
@@ -31,42 +36,38 @@ public struct SecretEditor: View {
 
     private var shown: Bool { draft.shown != nil }
 
-    private func reveal() async {
-        guard let onReveal else { return }
+    /// Loads the stored values into the draft. Returns whether it did.
+    @discardableResult
+    private func reveal() async -> Bool {
+        guard let onReveal, !revealing else { return shown }
         revealing = true
         error = nil
+        defer { revealing = false }
         switch await onReveal() {
         case .success(let revealed):
             draft.show(revealed)
+            return true
         case .failure(let problem):
             error = problem.message
-        }
-        revealing = false
-    }
-
-    /// Where the stored values are shown, or the button that shows them.
-    @ViewBuilder private var showValues: some View {
-        if existing != nil, onReveal != nil, !shown {
-            Button {
-                Task { await reveal() }
-            } label: {
-                Label(revealing ? "Waiting for You\u{2026}" : "Show Values", systemImage: "eye")
-            }
-            .disabled(revealing)
+            return false
         }
     }
 
-    /// A value field: hidden while typing, with an eye to check what was
-    /// typed; readable, with a copy button, once the stored values are shown.
-    @ViewBuilder private func valueField(_ title: String, _ text: Binding<String>, prompt: String?) -> some View {
-        if shown {
-            HStack {
-                TextField(title, text: text, prompt: prompt.map { Text($0) })
-                    .font(.system(.body, design: .monospaced))
-                CopyButton(value: text.wrappedValue)
-            }
-        } else {
-            PeekField(title: title, text: text, prompt: prompt)
+    /// The eye's first press loads the stored values, when they are not yet.
+    private var loadFirst: (() async -> Bool)? {
+        existing != nil && !shown && onReveal != nil ? { await reveal() } : nil
+    }
+
+    /// A value field, hidden behind an eye that shows the current value (or
+    /// what was typed), with a copy button once the stored value is loaded.
+    @ViewBuilder private func valueField(
+        _ title: String, _ text: Binding<String>, prompt: String?, editable: Bool = true
+    ) -> some View {
+        HStack {
+            PeekField(
+                title: title, text: text, prompt: prompt, startVisible: revealOnOpen, editable: editable,
+                onFirstPeek: loadFirst)
+            if shown { CopyButton(value: text.wrappedValue) }
         }
     }
 
@@ -129,7 +130,7 @@ public struct SecretEditor: View {
         }
         .frame(width: 500, height: 620)
         .task {
-            if revealOnOpen { await reveal() }
+            if revealOnOpen || loadsAtOnce { await reveal() }
         }
     }
 
@@ -150,19 +151,19 @@ public struct SecretEditor: View {
         }
 
         Section {
-            if existing != nil && !shown {
-                // A stored login is changed only once shown, so that what is
-                // not retyped is kept.
-                showValues
-            } else {
-                HStack {
-                    TextField("Username", text: $draft.username, prompt: Text("optional"))
-                    if shown { CopyButton(value: draft.username) }
-                }
-                valueField("Password", $draft.password, prompt: "required")
-                if let key = draft.effectiveTwoFactorKey {
-                    TwoFactorCodeRow(key: key)
-                }
+            // A stored login changes only once its values are loaded, so that
+            // what is not retyped is kept.
+            let locked = existing != nil && !shown
+            HStack {
+                TextField("Username", text: $draft.username, prompt: Text(locked ? "unchanged" : "optional"))
+                    .disabled(locked)
+                if shown { CopyButton(value: draft.username) }
+            }
+            valueField("Password", $draft.password, prompt: locked ? "unchanged" : "required", editable: !locked)
+            if let key = draft.effectiveTwoFactorKey {
+                TwoFactorCodeRow(key: key)
+            }
+            if !locked {
                 HStack {
                     PeekField(
                         title: draft.shown?["totp"] == nil ? "Two-Factor Key" : "New Two-Factor Key",
@@ -194,7 +195,9 @@ public struct SecretEditor: View {
                     ? "The two-factor key is the setup key or otpauth:// link a site shows when you turn on an authenticator app; or copy its QR code and paste it with the QR button. It stays on your devices: a page only ever gets the current code."
                     : shown
                         ? "The code is what the site asks for now; the key behind it is never shown. To replace the key, type or paste a new one, or paste its QR code. Copied values are cleared from the clipboard after a minute."
-                        : "Show the values to read or change them. Changing the level needs them too."
+                        : revealing
+                            ? "Waiting for you to confirm\u{2026}"
+                            : "Press the eye to see the current values and change them. Changing the level needs them too."
             )
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -235,7 +238,6 @@ public struct SecretEditor: View {
                     }
                     Button("Add Field") { draft.fields.append(.init(name: "")) }
                         .buttonStyle(.borderless)
-                    showValues
                 } header: {
                     Text("Value")
                 } footer: {
@@ -243,7 +245,7 @@ public struct SecretEditor: View {
                         Text(
                             shown
                                 ? "Edit what you need and save. Copied values are cleared from the clipboard after a minute."
-                                : "Leave empty to keep what is stored, or show it to read and edit it. Changing the level needs the value again."
+                                : "Press the eye to see the current value, or type a new one; empty keeps it. Changing the level needs the value again."
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -354,23 +356,46 @@ struct PeekField: View {
     let title: String
     @Binding var text: String
     let prompt: String?
-    @State private var visible = false
+    let editable: Bool
+    /// Loads the stored value before the eye first shows it; nil when there
+    /// is nothing to load. Returns whether it loaded.
+    let onFirstPeek: (() async -> Bool)?
+    @State private var visible: Bool
+
+    init(
+        title: String, text: Binding<String>, prompt: String?, startVisible: Bool = false, editable: Bool = true,
+        onFirstPeek: (() async -> Bool)? = nil
+    ) {
+        self.title = title
+        _text = text
+        self.prompt = prompt
+        self.editable = editable
+        self.onFirstPeek = onFirstPeek
+        _visible = State(initialValue: startVisible)
+    }
 
     var body: some View {
         HStack {
-            if visible {
-                TextField(title, text: $text, prompt: prompt.map { Text($0) })
-                    .font(.system(.body, design: .monospaced))
-            } else {
-                SecureField(title, text: $text, prompt: prompt.map { Text($0) })
+            Group {
+                if visible {
+                    TextField(title, text: $text, prompt: prompt.map { Text($0) })
+                        .font(.system(.body, design: .monospaced))
+                } else {
+                    SecureField(title, text: $text, prompt: prompt.map { Text($0) })
+                }
             }
+            .disabled(!editable)
             Button {
-                visible.toggle()
+                if !visible, let onFirstPeek {
+                    Task { if await onFirstPeek() { visible = true } }
+                } else {
+                    visible.toggle()
+                }
             } label: {
                 Image(systemName: visible ? "eye.slash" : "eye")
             }
             .buttonStyle(.borderless)
-            .help(visible ? "Hide what you typed" : "Show what you typed")
+            .help(visible ? "Hide" : onFirstPeek != nil ? "Show the current value" : "Show")
             .accessibilityLabel(visible ? "Hide" : "Show")
         }
     }
@@ -518,6 +543,7 @@ public struct SecretsView: View {
                 existing: target.existing,
                 onReveal: target.existing.map { secret in { await model.revealSecret(secret) } },
                 revealOnOpen: target.revealsAtOnce,
+                loadsAtOnce: target.existing.map { model.unlocked && $0.level < 4 } ?? false,
                 onSave: { change in
                     let problem = apply(change)
                     if problem == nil { editor = nil }

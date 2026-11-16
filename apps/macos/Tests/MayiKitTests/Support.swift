@@ -64,6 +64,17 @@ struct FixedPresence: PresenceCheck {
     func confirm(reason: String) async -> Bool { present }
 }
 
+/// Counts how often the owner is asked, and always says yes.
+final class CountingPresence: PresenceCheck, @unchecked Sendable {
+    private let lock = NSLock()
+    private var asked = 0
+    var count: Int { lock.withLock { asked } }
+    func confirm(reason: String) async -> Bool {
+        lock.withLock { asked += 1 }
+        return true
+    }
+}
+
 struct CommandResult {
     var status: Int32
     var out: String

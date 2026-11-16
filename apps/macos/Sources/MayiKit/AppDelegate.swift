@@ -281,6 +281,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         model.refresh()
         if let mainWindow { show(mainWindow) }
+        // Asked once here, rather than for each value shown or device added.
+        if !model.unlocked { Task { await model.unlock() } }
     }
 
     /// Shows the oldest pending approval; the rest wait their turn.

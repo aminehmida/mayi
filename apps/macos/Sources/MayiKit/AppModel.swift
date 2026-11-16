@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -90,7 +91,12 @@ public final class AppModel: ObservableObject {
     @Published public var rotationAdvice: String?
     /// A recovery key just created, shown once and then forgotten.
     @Published public private(set) var recoveryKey: String?
+    /// The owner confirmed with Touch ID or their password since the Mac was
+    /// last locked or asleep, so showing values, pairing and the like need
+    /// no further check. Level 4 secrets still ask on every use.
+    @Published public private(set) var unlocked = false
     private var syncTimer: Timer?
+    private var lockWatchers: [NSObjectProtocol] = []
 
     /// How often to sync with the vault's other devices while running.
     public static let syncInterval: TimeInterval = 300
@@ -108,6 +114,39 @@ public final class AppModel: ObservableObject {
 
     public init(presence: PresenceCheck = BiometricPresence()) {
         self.presence = presence
+    }
+
+    /// Asks the owner once, then keeps Mayi unlocked until the Mac locks or
+    /// sleeps. Returns whether it is unlocked.
+    @discardableResult
+    public func unlock(reason: String = "show your secrets and manage your devices") async -> Bool {
+        if unlocked { return true }
+        guard await presence.confirm(reason: reason) else { return false }
+        unlocked = true
+        watchForLock()
+        return true
+    }
+
+    public func lock() {
+        unlocked = false
+    }
+
+    /// Locks Mayi when the screen locks, the display sleeps or the Mac sleeps.
+    private func watchForLock() {
+        guard lockWatchers.isEmpty else { return }
+        let relock: @Sendable (Notification) -> Void = { [weak self] _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.lock() } }
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification,
+            NSWorkspace.sessionDidResignActiveNotification,
+        ] {
+            lockWatchers.append(workspace.addObserver(forName: name, object: nil, queue: nil, using: relock))
+        }
+        lockWatchers.append(
+            DistributedNotificationCenter.default().addObserver(
+                forName: .init("com.apple.screenIsLocked"), object: nil, queue: nil, using: relock))
     }
 
     /// Opens (or creates) the vault and starts serving requesters.
@@ -213,7 +252,7 @@ public final class AppModel: ObservableObject {
     /// are present. Returns an error message on failure.
     public func startEnrolment() async -> String? {
         guard let device, let paths else { return "The vault is not open." }
-        guard await presence.confirm(reason: "add a device that will hold all your secrets") else {
+        guard await unlock() else {
             return "Adding a device needs you to confirm, with Touch ID or your password."
         }
         guard listenForMachines() else { return remoteError }
@@ -249,7 +288,7 @@ public final class AppModel: ObservableObject {
     /// failure.
     public func createRecoveryKey() async -> String? {
         guard let device else { return "The vault is not open." }
-        guard await presence.confirm(reason: "create a key that can open your vault without this Mac") else {
+        guard await unlock() else {
             return "Creating a recovery key needs you to confirm, with Touch ID or your password."
         }
         do {
@@ -323,7 +362,7 @@ public final class AppModel: ObservableObject {
     /// Returns an error message on failure.
     public func startPairing() async -> String? {
         guard let device, let paths else { return "The vault is not open." }
-        guard await presence.confirm(reason: "allow another machine to request secrets") else {
+        guard await unlock() else {
             return "Pairing needs you to confirm, with Touch ID or your password."
         }
         guard listenForMachines() else { return remoteError }
@@ -454,7 +493,7 @@ public final class AppModel: ObservableObject {
         guard let device else { return .failure("The vault is not open.") }
         let name = secret.name
         if secret.level < 4 {
-            guard await presence.confirm(reason: "show \(name)") else {
+            guard await unlock() else {
                 return .failure("Showing values needs you to confirm, with Touch ID or your password.")
             }
         }

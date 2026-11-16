@@ -11,6 +11,7 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
@@ -61,6 +62,30 @@ class MayiApp : Application() {
 
     val defaultDeviceName: String
         get() = Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL
+
+    /**
+     * The owner confirmed with a fingerprint since the screen last locked, so
+     * showing values, pairing and the like ask nothing more. Level 4 secrets
+     * still ask on every use.
+     */
+    @Volatile
+    var unlocked = false
+        private set
+
+    /** When the app last went to the background, or 0 while it is on screen. */
+    @Volatile
+    var backgroundSince = 0L
+
+    /** Asks for a fingerprint once, then stays unlocked until [lock]. Blocks. */
+    @Synchronized
+    fun unlock(reason: String = "Unlock Mayi"): Boolean {
+        if (!unlocked) unlocked = authenticate(reason)
+        return unlocked
+    }
+
+    fun lock() {
+        unlocked = false
+    }
 
     /** Whether this phone can hold a vault at all: it needs a strong biometric. */
     val biometricsReady: Boolean
@@ -129,6 +154,15 @@ class MayiApp : Application() {
         // background, where Android refuses a foreground service. It is started
         // by the screen, the boot receiver and the restart check instead.
         if (hasVault) scheduleRestartCheck()
+        // Locks when the screen goes off.
+        ContextCompat.registerReceiver(
+            this,
+            object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) = lock()
+            },
+            IntentFilter(Intent.ACTION_SCREEN_OFF),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
     }
 
     /**

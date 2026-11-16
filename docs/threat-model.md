@@ -118,7 +118,12 @@ fingerprint-only key until they set up their vault again.
 ### Someone at an unlocked device
 
 The apps show a secret's values only after the owner confirms: Touch ID or
-the login password on a Mac, a fingerprint on a phone. A login's two-factor
+the login password on a Mac, a fingerprint on a phone. One confirmation
+unlocks the app until the Mac locks or sleeps, or until the phone's screen
+goes off or the app has been in the background for five minutes; while
+unlocked, showing values, pairing a machine, adding a device and creating a
+recovery key ask nothing more. Someone at an unlocked Mac with Mayi unlocked
+can therefore read secrets below level 4 without a further check. A login's two-factor
 key is never shown, only the code it gives now. For level 4 that
 confirmation is the hardware unlock itself. Every view is written to the
 activity log, without the value.

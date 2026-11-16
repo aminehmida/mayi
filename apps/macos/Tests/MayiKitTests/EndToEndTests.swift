@@ -163,4 +163,25 @@ import Testing
         #expect(revealed.fields.map(\.value) == ["abc123"])
         #expect(owner.log.last?.event == "view")
     }
+
+    @Test func theOwnerIsAskedOnceUntilTheMacLocks() async throws {
+        let dir = try scratch()
+        let presence = CountingPresence()
+        let model = AppModel(presence: presence)
+        try model.start(
+            keys: TestKeys(),
+            paths: MayiPaths(home: dir.appendingPathComponent("home"), socket: dir.appendingPathComponent("s.sock").path),
+            deviceName: "test")
+        _ = model.saveSecret(name: "A", level: 2, values: ["value": "a"], allow: [], maxGrantSecs: 0)
+        _ = model.saveSecret(name: "B", level: 3, values: ["value": "b"], allow: [], maxGrantSecs: 0)
+        #expect(!model.unlocked)
+        for secret in model.secrets {
+            _ = try await model.revealSecret(secret).get()
+        }
+        #expect(await model.startPairing() == nil)
+        #expect(presence.count == 1, "one confirmation covers every value and the pairing")
+        model.lock()
+        _ = try await model.revealSecret(try #require(model.secrets.first)).get()
+        #expect(presence.count == 2, "locked again: asked again")
+    }
 }

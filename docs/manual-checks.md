@@ -248,6 +248,10 @@ dot, the fingerprint prompt, the shown value with its copy button, and the
       and on a real phone.
 - [ ] Add a secret on the Mac: its orange dot goes once the phone has synced,
       and the phone shows no dot for it.
+- [ ] Opening Mayi asks once (Touch ID or password on the MacBook, a
+      fingerprint on the phone); after that, showing values and pairing ask
+      nothing until the Mac locks or the phone's screen goes off. Opening the
+      phone app from a request notification does not ask.
 - [ ] A shown login's two-factor code matches your authenticator app, and the
       site accepts it; replacing the key by pasting a QR code on the Mac and
       by scanning on a real phone both work.

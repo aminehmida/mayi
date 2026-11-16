@@ -107,9 +107,16 @@ your login password for every unlock, so a closed lid does not block them.
 A Mac set up before v0.1.0-alpha.3 keeps its fingerprint-only key, which
 changed fingerprints make unusable, until its vault is set up again.
 
-To read a secret yourself, select it and choose Show Values: after Touch ID
-or your password, its values appear in the editor, where you can change them
-or copy one (the clipboard is cleared after a minute). A login shows its
+Mayi asks for Touch ID or your password once, when you open its window, and
+stays unlocked until the Mac locks or sleeps; the phone asks for your
+fingerprint when you open it, and locks with the screen or after five minutes
+in the background. Unlocked, it shows values, pairs machines and adds devices
+without asking again. Level 4 secrets still ask on every use: that is what
+level 4 means.
+
+To read a secret yourself, edit it and press the eye next to a value, or
+choose Show Values: the current values appear, ready to change or copy (the
+clipboard is cleared after a minute). A login shows its
 current two-factor code, never the key behind it; to replace the key, type or
 paste a new one, or copy its QR code (Control-Shift-Command-4) and paste it
 with the QR button. The phone scans it with the camera. Each view is listed in

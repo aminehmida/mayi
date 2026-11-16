@@ -173,10 +173,38 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    /** Asked to unlock since coming to the screen, so a cancel is not asked again at once. */
+    private var askedToUnlock = false
+
+    override fun onStart() {
+        super.onStart()
+        // Five minutes in the background locks it, as the screen going off does.
+        if (app.backgroundSince != 0L && System.currentTimeMillis() - app.backgroundSince > 5 * 60_000) app.lock()
+        app.backgroundSince = 0L
+    }
+
     override fun onResume() {
         super.onResume()
         resumes.intValue++
         app.foreground = this
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Asked once on opening, rather than for each value shown or device
+        // added; not when a request is waiting, so approving stays one tap.
+        // Only once the window has focus: a prompt shown while the lock
+        // screen is still going away is cancelled by the system.
+        if (hasFocus && app.hasVault && !app.unlocked && !askedToUnlock && app.controller.state.pending.isEmpty()) {
+            askedToUnlock = true
+            Thread { app.unlock() }.start()
+        }
+    }
+
+    override fun onStop() {
+        app.backgroundSince = System.currentTimeMillis()
+        askedToUnlock = false
+        super.onStop()
     }
 
     override fun onPause() {
@@ -768,7 +796,7 @@ private fun Secrets(
     val reveal = { secret: SecretRecord, done: (Result<RevealedSecret>) -> Unit ->
         Thread {
             done(
-                if (secret.level < 4u && !app.authenticate("Show ${secret.name}")) {
+                if (secret.level < 4u && !app.unlock("Show ${secret.name}")) {
                     Result.failure(IllegalStateException("Showing values needs your fingerprint."))
                 } else {
                     controller.reveal(secret.name)
@@ -831,6 +859,7 @@ private fun Secrets(
             AddSecret(
                 scan = scan, existing = secret, onCancel = { editing = null },
                 reveal = { done -> reveal(secret, done) }, revealOnOpen = showing,
+                loadsAtOnce = app.unlocked && secret.level < 4u,
             ) { draft ->
                 val problem = save(controller, draft)
                 if (problem == null) editing = null
@@ -931,6 +960,8 @@ private fun AddSecret(
     reveal: (((Result<RevealedSecret>) -> Unit) -> Unit)? = null,
     /** Show the values as soon as the sheet opens. */
     revealOnOpen: Boolean = false,
+    /** Load the values when the sheet opens, hidden behind their eyes: when that asks nothing. */
+    loadsAtOnce: Boolean = false,
     onSave: (NewSecret) -> String?,
 ) {
     val editing = existing != null
@@ -980,7 +1011,7 @@ private fun AddSecret(
             }.onFailure { error = MayiController.describe(it) }
         }
     }
-    LaunchedEffect(Unit) { if (revealOnOpen) showValues() }
+    LaunchedEffect(Unit) { if (revealOnOpen || loadsAtOnce) showValues() }
     val keep = if (editing && shown == null) "unchanged" else null
     val storedKey = shown?.get("totp")?.takeIf { !removeTwoFactor }
     /** The two-factor key saving keeps: a new one typed, else the stored one. */
@@ -998,41 +1029,38 @@ private fun AddSecret(
     @Composable
     fun SecretField(
         text: String, set: (String) -> Unit, label: String, hint: String? = keep, private: Boolean = false,
-        trailing: (@Composable () -> Unit)? = null,
+        readOnly: Boolean = false, trailing: (@Composable () -> Unit)? = null,
     ) {
         key(label) {
-            var peek by remember { mutableStateOf(false) }
-            val stored = shown != null && !private
-            val visible = stored || peek
+            var peek by remember { mutableStateOf(revealOnOpen && !private) }
+            // The eye's first press on a stored secret loads its values.
+            val loadFirst = editing && shown == null && reveal != null && !private
             OutlinedTextField(
-                text, set, Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true,
+                text, set, Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true, readOnly = readOnly,
                 placeholder = hint?.let { { Text(it) } },
-                visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
-                textStyle = if (visible) mono else MaterialTheme.typography.bodyLarge,
+                visualTransformation = if (peek) VisualTransformation.None else PasswordVisualTransformation(),
+                textStyle = if (peek) mono else MaterialTheme.typography.bodyLarge,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                trailingIcon = if (stored) ({ copy(text) }) else {
-                    {
-                        Row {
-                            trailing?.invoke()
-                            IconButton(onClick = { peek = !peek }) {
-                                Icon(
-                                    if (peek) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                                    contentDescription = if (peek) "Hide what you typed" else "Show what you typed",
-                                )
-                            }
+                trailingIcon = {
+                    Row {
+                        if (shown != null && !private) copy(text)
+                        trailing?.invoke()
+                        IconButton(onClick = {
+                            if (!peek && loadFirst) showValues()
+                            peek = !peek
+                        }) {
+                            Icon(
+                                if (peek) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                                contentDescription = when {
+                                    peek -> "Hide"
+                                    loadFirst -> "Show the current value"
+                                    else -> "Show"
+                                },
+                            )
                         }
                     }
                 },
             )
-        }
-    }
-    val showButton = @Composable {
-        if (editing && reveal != null && shown == null) {
-            OutlinedButton(onClick = ::showValues, enabled = !revealing) {
-                Icon(Icons.Outlined.Visibility, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
-                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                Text(if (revealing) "Waiting for you…" else "Show values")
-            }
         }
     }
     val shownHint = "Edit what you need and save. Copied values are cleared from the clipboard after a minute."
@@ -1068,17 +1096,17 @@ private fun AddSecret(
                 placeholder = { Text("github.com") }, textStyle = mono, minLines = 1,
                 supportingText = { Text("As the address bar shows them. *.example.com covers its subdomains. Typed into these sites only, over https.") },
             )
-            // A stored login is changed only once shown, so that what is not
-            // retyped is kept.
-            if (editing && shown == null) {
-                showButton()
-            } else {
-                OutlinedTextField(
-                    username, { username = it }, Modifier.fillMaxWidth(), label = { Text("Username (optional)") }, singleLine = true,
-                    trailingIcon = if (shown != null) ({ copy(username) }) else null,
-                )
-                SecretField(password, { password = it }, "Password", hint = null)
-                twoFactorKey?.let { TwoFactorCodeRow(it, copy) }
+            // A stored login changes only once its values are loaded, so that
+            // what is not retyped is kept.
+            val locked = editing && shown == null
+            OutlinedTextField(
+                username, { username = it }, Modifier.fillMaxWidth(), label = { Text("Username (optional)") }, singleLine = true,
+                readOnly = locked, placeholder = if (locked) ({ Text("unchanged") }) else null,
+                trailingIcon = if (shown != null) ({ copy(username) }) else null,
+            )
+            SecretField(password, { password = it }, "Password", hint = if (locked) "unchanged" else null, readOnly = locked)
+            twoFactorKey?.let { TwoFactorCodeRow(it, copy) }
+            if (!locked) {
                 SecretField(
                     twoFactor, { twoFactor = it }, if (storedKey != null) "New two-factor key" else "Two-factor key (optional)",
                     hint = if (storedKey != null) "unchanged" else null, private = true,
@@ -1094,31 +1122,27 @@ private fun AddSecret(
             Text(
                 when {
                     shown != null -> "The code is what the site asks for now; the key behind it is never shown. To replace the key, scan its QR code or paste a new one. Copied values are cleared from the clipboard after a minute."
-                    editing -> "Show the values to read or change them. Changing the level needs them too."
+                    revealing -> "Waiting for you to confirm…"
+                    editing -> "Tap the eye to see the current values and change them. Changing the level needs them too."
                     else -> "The two-factor key is what a site shows when you turn on an authenticator app: scan its QR code, or paste the key. It stays on your devices; a page only ever gets the current code."
                 },
                 style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
             )
         } else if (severalFields) {
-            if (shown == null) {
-                Text(
-                    "This secret holds ${existing?.fields?.joinToString()}. Show its values to read and edit them.",
-                    style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
-                )
-                showButton()
-            } else {
-                for (field in existing?.fields.orEmpty()) {
-                    SecretField(fieldValues[field] ?: "", { fieldValues[field] = it }, field)
-                }
-                Text(shownHint, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+            for (field in existing?.fields.orEmpty()) {
+                SecretField(fieldValues[field] ?: "", { fieldValues[field] = it }, field)
             }
+            Text(
+                if (shown != null) shownHint
+                else "Tap an eye to see the current values, or type new ones for every field; all empty keeps them.",
+                style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
+            )
         } else {
             SecretField(value, { value = it }, "Value")
-            showButton()
             if (editing) {
                 Text(
                     if (shown != null) shownHint
-                    else "Leave empty to keep what is stored, or show it to read and edit it. Changing the level needs the value again.",
+                    else "Tap the eye to see the current value, or type a new one; empty keeps it. Changing the level needs the value again.",
                     style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
                 )
             }
@@ -1177,8 +1201,8 @@ private fun AddSecret(
                             if (username.isNotBlank()) put("username", username.trim())
                             twoFactorKey?.let { put("totp", it) }
                         }
-                        severalFields && shown == null -> emptyMap()
-                        severalFields -> fieldValues.toMap()
+                        severalFields && fieldValues.values.all { it.isEmpty() } -> emptyMap()
+                        severalFields -> existing?.fields.orEmpty().associateWith { fieldValues[it] ?: "" }
                         editing && value.isEmpty() -> emptyMap()
                         else -> mapOf("value" to value)
                     }
@@ -1268,7 +1292,7 @@ private fun AddDevice(
         showing = true
         error = null
         Thread {
-            if (!app.authenticate("Add a device that will hold all your secrets")) {
+            if (!app.unlock("Add a device that will hold all your secrets")) {
                 error = "Adding a device needs your fingerprint."
             } else {
                 controller.startEnrolment(600u).onSuccess { invitation = it }.onFailure { error = it.message }
@@ -1359,7 +1383,7 @@ private fun PairMachine(app: MayiApp, controller: MayiController, state: MayiCon
     var error by remember { mutableStateOf<String?>(null) }
     DisposableEffect(Unit) {
         Thread {
-            if (!app.authenticate("Allow another machine to request secrets")) {
+            if (!app.unlock("Allow another machine to request secrets")) {
                 error = "Pairing needs your fingerprint."
             } else {
                 controller.startPairing(600u).onSuccess { token = it }.onFailure { error = it.message }
@@ -1505,7 +1529,7 @@ private fun Devices(
                 supportingContent = { Text("An offline key that restores the vault if your devices’ keys are lost") },
                 modifier = Modifier.clickable {
                     Thread {
-                        if (!app.authenticate("Create a key that can open your vault without this phone")) {
+                        if (!app.unlock("Create a key that can open your vault without this phone")) {
                             error = "Creating a recovery key needs your fingerprint."
                         } else {
                             controller.createRecoveryKey()
