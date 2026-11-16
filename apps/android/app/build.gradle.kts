@@ -18,8 +18,8 @@ android {
         // Android 12: key agreement with keys held in the Android Keystore.
         minSdk = 31
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.1.0-alpha.6"
+        versionCode = 7
+        versionName = "0.1.0-alpha.7"
         // The ABIs build-core.sh builds the Rust core for. Without this the APK
         // would claim every ABI JNA ships, and crash on the others.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
