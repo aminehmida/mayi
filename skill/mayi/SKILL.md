@@ -64,6 +64,11 @@ prints how to connect your tool to it.
 
 - Never type a password or a code yourself, and never read a password field
   or run scripts that look at what was typed.
+- Sign in only in the browser with the debugging port (the one `mayi browser`
+  starts, or the one your browser tool is attached to through it). Do not use
+  a tool that drives the user's everyday browser through an extension, such
+  as Claude in Chrome, for the sign-in or anything after it: `mayi fill`
+  cannot reach that browser, and it holds the user's own sessions.
 - If Mayi says it found no field, name it: `--username-selector`,
   `--password-selector` or `--code-selector` take a CSS selector. If the form
   needs a button clicked rather than Enter, pass `--submit-selector`.
@@ -118,8 +123,3 @@ line only when something changes, such as
 | 64 | Bad arguments, or `mayi fill` given a secret that is not a login. | Fix the command. |
 
 Any other code is the command's own.
-
-## Without a shell
-
-If you cannot run commands but have MCP tools, `mayi mcp` offers the same
-operations as `list_secrets`, `run_with_secrets` and `fill_login`.

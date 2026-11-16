@@ -14,7 +14,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::crypto;
-use crate::vault::{device_id, member_aad, requester_aad, DeviceRecord, Stamp, Vault};
+use crate::vault::{device_id, member_aad, requester_aad, DeviceRecord, Stamp, Vault, LOG_BATCH};
 use crate::{Error, Result};
 
 /// One synced row. Binary fields are hex.
@@ -32,6 +32,9 @@ pub enum Record {
         wraps: Vec<(String, String)>,
     },
     Requester { id: String, stamp: Stamp, sealed: String },
+    /// One activity entry written by `author`, its `seq`-th, sealed under the
+    /// vault key. Sent only to devices whose digest lists activity marks.
+    Log { author: String, seq: u64, ts_ms: u64, sealed: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,16 +136,47 @@ impl Vault {
                 key("item", id),
                 DigestEntry { stamp: stamp.clone(), wraps: wraps.iter().map(|(r, _)| r.clone()).collect() },
             ),
+            Record::Log { author, seq, .. } => (
+                key("log", author),
+                DigestEntry { stamp: Stamp { version: *seq, author: author.clone() }, wraps: BTreeSet::new() },
+            ),
         }
     }
 
+    /// What this device holds: every record's stamp, and for activity, the
+    /// newest entry held from each device (`log:<device>`).
     pub fn digest(&self) -> Result<Digest> {
-        Ok(self.records()?.iter().map(Self::digest_of).collect())
+        let mut digest: Digest = self.records()?.iter().map(Self::digest_of).collect();
+        for (author, seq) in self.log_marks()? {
+            let entry = DigestEntry { stamp: Stamp { version: seq, author: author.clone() }, wraps: BTreeSet::new() };
+            digest.insert(key("log", &author), entry);
+        }
+        Ok(digest)
+    }
+
+    /// Activity entries a peer with this digest lacks, a batch at a time. A
+    /// device too old to keep activity lists no marks, and is sent none.
+    fn logs_newer_than(&self, theirs: &Digest) -> Result<Vec<Record>> {
+        if !theirs.keys().any(|k| k.starts_with("log:")) {
+            return Ok(Vec::new());
+        }
+        let mut records = Vec::new();
+        for (author, mine) in self.log_marks()? {
+            let budget = LOG_BATCH.saturating_sub(records.len());
+            let after = theirs.get(&key("log", &author)).map_or(0, |e| e.stamp.version);
+            if budget == 0 || mine <= after {
+                continue;
+            }
+            records.extend(self.log_after(&author, after, budget)?.into_iter().map(|(seq, ts_ms, sealed)| {
+                Record::Log { author: author.clone(), seq, ts_ms, sealed: hex::encode(sealed) }
+            }));
+        }
+        Ok(records)
     }
 
     /// The records a peer with this digest lacks or holds an older copy of.
     pub fn newer_than(&self, theirs: &Digest) -> Result<Vec<Record>> {
-        Ok(self
+        let mut records: Vec<Record> = self
             .records()?
             .into_iter()
             .filter(|record| {
@@ -153,7 +187,9 @@ impl Vault {
                     Some(entry) => entry.stamp == mine.stamp && !mine.wraps.is_subset(&entry.wraps),
                 }
             })
-            .collect())
+            .collect();
+        records.extend(self.logs_newer_than(theirs)?);
+        Ok(records)
     }
 
     /// Merges records from another device. Returns how many changed
@@ -165,6 +201,12 @@ impl Vault {
         for record in records {
             let stamp = match record {
                 Record::Member { stamp, .. } | Record::Item { stamp, .. } | Record::Requester { stamp, .. } => stamp,
+                Record::Log { author, seq, ts_ms, sealed } => {
+                    if self.keep_log(&tx, author, *seq, *ts_ms, &unhex(sealed)?)? {
+                        changed += 1;
+                    }
+                    continue;
+                }
             };
             self.observe(&tx, stamp.version)?;
             let local = |table: &str, id: &str| -> Result<Option<Stamp>> {
@@ -260,6 +302,7 @@ impl Vault {
                         }
                     }
                 }
+                Record::Log { .. } => unreachable!("kept above"),
             }
         }
         tx.commit()?;
@@ -327,6 +370,7 @@ mod tests {
             max_grant_secs: 600,
             kind: Kind::Secret,
             sites: vec![],
+            folder: None,
         }
     }
 
@@ -523,5 +567,85 @@ mod tests {
         assert!(sync_as_callee(&p.mac, &entries, &mut rest, &mut sink).unwrap() >= 1);
         assert_eq!(p.mac.digest().unwrap(), p.phone.digest().unwrap());
         assert_eq!(value(&p.mac, "B"), "b");
+    }
+
+    fn entry(event: &str, name: &str) -> crate::vault::AuditEntry {
+        crate::vault::AuditEntry {
+            ts_ms: crate::now_ms(),
+            event: event.into(),
+            outcome: "released".into(),
+            requester: "build-vm (abcd1234)".into(),
+            secrets: vec![crate::vault::SecretUse { name: name.into(), level: 1, via: "level".into() }],
+            ..Default::default()
+        }
+    }
+
+    /// Each device's activity reaches the others, a batch at a time, marked
+    /// with the device that wrote it.
+    #[test]
+    fn activity_reaches_every_device() {
+        let p = pair(&[("L1", Level::Log)]);
+        sync(&p.mac, &p.phone);
+        p.mac.audit(&entry("request", "FROM_MAC")).unwrap();
+        p.phone.audit(&entry("request", "FROM_PHONE")).unwrap();
+        sync(&p.mac, &p.phone);
+        let names = |v: &Vault| -> Vec<(String, String)> {
+            v.audit_tail(10).unwrap().into_iter().map(|e| (e.secrets[0].name.clone(), e.device)).collect()
+        };
+        let mac_id = p.mac.device_id().to_string();
+        let phone_id = p.phone.device_id().to_string();
+        assert!(names(&p.mac).contains(&("FROM_PHONE".into(), phone_id)));
+        assert!(names(&p.mac).contains(&("FROM_MAC".into(), String::new())), "its own, unmarked");
+        assert!(names(&p.phone).contains(&("FROM_MAC".into(), mac_id)));
+        assert_eq!(sync(&p.mac, &p.phone), (0, 0), "nothing left to exchange");
+
+        // A long backlog goes over in batches.
+        for i in 0..(LOG_BATCH + 20) {
+            p.mac.audit(&entry("request", &format!("N{i}"))).unwrap();
+        }
+        assert_eq!(sync(&p.mac, &p.phone).1, LOG_BATCH);
+        assert_eq!(sync(&p.mac, &p.phone).1, 20);
+        assert_eq!(p.phone.audit_tail(1000).unwrap().len(), LOG_BATCH + 20 + 2);
+    }
+
+    /// A device too old to keep activity lists no marks in its digest, and is
+    /// sent none: an unknown record would stop it syncing at all.
+    #[test]
+    fn older_devices_are_sent_no_activity() {
+        let p = pair(&[("L1", Level::Log)]);
+        p.mac.audit(&entry("request", "L1")).unwrap();
+        let mut old = p.phone.digest().unwrap();
+        old.retain(|key, _| !key.starts_with("log:"));
+        assert!(!p.mac.newer_than(&old).unwrap().iter().any(|r| matches!(r, Record::Log { .. })));
+        let new = p.phone.digest().unwrap();
+        assert!(p.mac.newer_than(&new).unwrap().iter().any(|r| matches!(r, Record::Log { .. })));
+    }
+
+    /// Revoking a machine flags what it was given, on every device, until
+    /// the value is replaced or the flag dismissed. Folders travel too.
+    #[test]
+    fn secrets_to_rotate_are_flagged_everywhere() {
+        let p = pair(&[("L1", Level::Log), ("L2", Level::Notify)]);
+        let machine = p.mac.add_requester("build-vm", [7u8; 32]).unwrap();
+        p.mac.audit(&crate::vault::AuditEntry { requester: machine.label(), ..entry("request", "L1") }).unwrap();
+        sync(&p.mac, &p.phone);
+        // Revoked on the phone, which learnt of the release by sync.
+        assert_eq!(p.phone.revoke_requester(&machine.id).unwrap().unwrap(), ["L1"]);
+        let flagged = p.phone.meta("L1").unwrap().rotate;
+        assert_eq!((flagged[0].who.as_str(), flagged[0].why.as_str()), ("build-vm", "revoked"));
+        assert!(p.phone.meta("L2").unwrap().rotate.is_empty());
+        sync(&p.mac, &p.phone);
+        assert_eq!(p.mac.meta("L1").unwrap().rotate.len(), 1, "the Mac shows it too");
+
+        // Rules and folders keep the flag; a new value clears it.
+        p.mac.update_rules("L1", vec![], 60, vec![], Some("Work".into())).unwrap();
+        assert_eq!(p.mac.meta("L1").unwrap().folder.as_deref(), Some("Work"));
+        assert_eq!(p.mac.meta("L1").unwrap().rotate.len(), 1);
+        p.mac.put(item("L1", Level::Log, "rotated")).unwrap();
+        assert!(p.mac.meta("L1").unwrap().rotate.is_empty());
+
+        // Or the owner dismisses it.
+        p.phone.flag_rotation(&["L2".into()], crate::model::RotateNote { who: "x".into(), why: "removed".into(), at_ms: 1 }).unwrap();
+        assert!(p.phone.dismiss_rotation("L2").unwrap().rotate.is_empty());
     }
 }

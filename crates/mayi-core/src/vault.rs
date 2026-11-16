@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 
 use crate::crypto::{self, Key};
 use crate::hardware::HardwareKeys;
-use crate::model::{ItemMeta, Kind, Level, NewItem, SecretValues};
+use crate::model::{ItemMeta, Kind, Level, NewItem, RotateNote, SecretValues};
 use crate::totp::Totp;
 use crate::{now_ms, Error, Result};
 
@@ -75,6 +75,13 @@ CREATE TABLE IF NOT EXISTS audit (
     ts_ms INTEGER NOT NULL,
     entry TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS shared_log (
+    author TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    ts_ms INTEGER NOT NULL,
+    entry TEXT NOT NULL,
+    PRIMARY KEY (author, seq)
+);
 ";
 
 /// Recipient name of the wrap made with the vault key.
@@ -118,6 +125,25 @@ pub struct AuditEntry {
     pub site: String,
     pub reason: String,
     pub secrets: Vec<SecretUse>,
+    /// The device that wrote the entry, when another device of the vault did;
+    /// empty for this one. Filled in when read, not stored.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device: String,
+}
+
+/// How long the activity log keeps an entry, on every device.
+const LOG_KEPT_MS: u64 = 90 * 24 * 3600 * 1000;
+
+/// The most activity entries one sync carries; the rest follow next time.
+pub(crate) const LOG_BATCH: usize = 300;
+
+pub(crate) fn log_aad(author: &str, seq: u64) -> Vec<u8> {
+    format!("mayi/log/{author}/{seq}").into_bytes()
+}
+
+/// A folder name as kept: trimmed, and none when empty.
+fn clean_folder(folder: Option<String>) -> Option<String> {
+    folder.map(|f| f.trim().to_string()).filter(|f| !f.is_empty())
 }
 
 /// A device holding this vault. Keys are hex.
@@ -531,6 +557,9 @@ impl Vault {
             fields: new.values.keys().cloned().collect(),
             kind: new.kind,
             sites,
+            folder: clean_folder(new.folder),
+            // A new value: whoever saw the old one no longer matters.
+            rotate: Vec::new(),
             version: next_version(&tx)?,
         };
         let payload = crypto::seal(
@@ -567,6 +596,7 @@ impl Vault {
         allow: Vec<String>,
         max_grant_secs: u64,
         sites: Vec<String>,
+        folder: Option<String>,
     ) -> Result<ItemMeta> {
         let mut meta = self.meta(name)?;
         if meta.kind == Kind::Login && !allow.is_empty() {
@@ -575,6 +605,34 @@ impl Vault {
         meta.sites = check_sites(meta.kind, &sites)?;
         meta.allow = allow;
         meta.max_grant_secs = max_grant_secs;
+        meta.folder = clean_folder(folder);
+        self.write_meta(meta)
+    }
+
+    /// Notes that whoever `note` names may still know these secrets' values.
+    /// Each shows a warning on every device until its value is replaced or
+    /// the owner dismisses it.
+    pub fn flag_rotation(&self, names: &[String], note: RotateNote) -> Result<()> {
+        for name in names {
+            let Ok(mut meta) = self.meta(name) else { continue };
+            if meta.rotate.iter().any(|n| n.who == note.who && n.why == note.why) {
+                continue;
+            }
+            meta.rotate.push(note.clone());
+            self.write_meta(meta)?;
+        }
+        Ok(())
+    }
+
+    /// The owner decided a secret needs no rotating after all.
+    pub fn dismiss_rotation(&self, name: &str) -> Result<ItemMeta> {
+        let mut meta = self.meta(name)?;
+        meta.rotate.clear();
+        self.write_meta(meta)
+    }
+
+    /// Stores changed metadata as a new version, the values untouched.
+    fn write_meta(&self, mut meta: ItemMeta) -> Result<ItemMeta> {
         let sealed_meta = crypto::seal(&self.vk, &meta_aad(&meta.id), &serde_json::to_vec(&meta)?);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
@@ -815,7 +873,7 @@ impl Vault {
             .prepare("SELECT item_id FROM wraps WHERE recipient = ?1")?
             .query_map([id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        let exposed = self
+        let exposed: Vec<String> = self
             .list()?
             .into_iter()
             .filter(|m| m.level != Level::Biometric || wrapped.contains(&m.id))
@@ -824,6 +882,10 @@ impl Vault {
         record.removed = true;
         self.save_device(&record)?;
         self.conn().execute("DELETE FROM wraps WHERE recipient = ?1", [id])?;
+        if !record.recovery {
+            let note = RotateNote { who: record.name.clone(), why: "removed".into(), at_ms: now_ms() };
+            self.flag_rotation(&exposed, note)?;
+        }
         Ok(Some(exposed))
     }
 
@@ -1002,9 +1064,9 @@ impl Vault {
     }
 
     /// Stops accepting requests from a machine. Returns the names of the
-    /// secrets this device released to it, which its processes have seen and
-    /// which should be rotated if the machine is no longer trusted; other
-    /// devices of the vault keep their own logs. `None` if unknown.
+    /// secrets released to it, by any device whose activity has reached this
+    /// one, which its processes have seen and which should be rotated; each
+    /// is flagged for rotation. `None` if unknown.
     pub fn revoke_requester(&self, id: &str) -> Result<Option<Vec<String>>> {
         let Some(mut record) = self.requesters()?.into_iter().find(|r| r.id == id) else {
             return Ok(None);
@@ -1020,6 +1082,8 @@ impl Vault {
             .collect();
         released.sort();
         released.dedup();
+        let note = RotateNote { who: record.name.clone(), why: "revoked".into(), at_ms: now_ms() };
+        self.flag_rotation(&released, note)?;
         Ok(Some(released))
     }
 
@@ -1103,23 +1167,98 @@ impl Vault {
     // --- Audit log ---------------------------------------------------------
 
     pub fn audit(&self, entry: &AuditEntry) -> Result<()> {
-        self.conn().execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT INTO audit (ts_ms, entry) VALUES (?1, ?2)",
             params![entry.ts_ms, serde_json::to_string(entry)?],
         )?;
+        // Kept for 90 days, here and as received from the other devices.
+        let cutoff = now_ms().saturating_sub(LOG_KEPT_MS);
+        conn.execute("DELETE FROM audit WHERE ts_ms < ?1", [cutoff])?;
+        conn.execute("DELETE FROM shared_log WHERE ts_ms < ?1", [cutoff])?;
         Ok(())
     }
 
-    /// The last `n` audit entries, oldest first.
+    /// The last `n` entries of the vault's activity, oldest first: this
+    /// device's and those received from the others, which carry `device`.
     pub fn audit_tail(&self, n: usize) -> Result<Vec<AuditEntry>> {
         let conn = self.conn();
-        let mut entries: Vec<AuditEntry> = conn
-            .prepare("SELECT entry FROM audit ORDER BY id DESC LIMIT ?1")?
-            .query_map([n as i64], |r| r.get::<_, String>(0))?
-            .map(|row| Ok(serde_json::from_str(&row?)?))
-            .collect::<Result<_>>()?;
-        entries.reverse();
-        Ok(entries)
+        // By time, and within a millisecond in the order each device wrote them.
+        let mut rows: Vec<(u64, u64, String, String)> = conn
+            .prepare(
+                "SELECT ts_ms, id, '', entry FROM audit
+                 UNION ALL SELECT ts_ms, seq, author, entry FROM shared_log
+                 ORDER BY 1 DESC, 2 DESC LIMIT ?1",
+            )?
+            .query_map([n as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        rows.reverse();
+        rows.into_iter()
+            .map(|(_, _, author, entry)| {
+                let mut entry: AuditEntry = serde_json::from_str(&entry)?;
+                entry.device = author;
+                Ok(entry)
+            })
+            .collect()
+    }
+
+    /// For sync: the newest activity entry held from each device of the
+    /// vault, by device id, 0 for none. Listing them tells a peer this device
+    /// takes activity.
+    pub(crate) fn log_marks(&self) -> Result<BTreeMap<String, u64>> {
+        let conn = self.conn();
+        let mut marks: BTreeMap<String, u64> = conn
+            .prepare("SELECT author, MAX(seq) FROM shared_log GROUP BY author")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let own: Option<u64> = conn.query_row("SELECT MAX(id) FROM audit", [], |r| r.get(0))?;
+        marks.insert(self.device_id.clone(), own.unwrap_or(0));
+        // Every device of the vault, so that two devices in step list the same.
+        let members: Vec<String> =
+            conn.prepare("SELECT id FROM members")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        for id in members {
+            marks.entry(id).or_insert(0);
+        }
+        Ok(marks)
+    }
+
+    /// For sync: up to `limit` activity entries of `author` after `after`,
+    /// oldest first, as (seq, ts_ms, sealed under the vault key).
+    pub(crate) fn log_after(&self, author: &str, after: u64, limit: usize) -> Result<Vec<(u64, u64, Vec<u8>)>> {
+        let conn = self.conn();
+        let rows: Vec<(u64, u64, String)> = if author == self.device_id {
+            conn.prepare("SELECT id, ts_ms, entry FROM audit WHERE id > ?1 ORDER BY id LIMIT ?2")?
+                .query_map(params![after, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        } else {
+            conn.prepare(
+                "SELECT seq, ts_ms, entry FROM shared_log WHERE author = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+            )?
+            .query_map(params![author, after, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        Ok(rows
+            .into_iter()
+            .map(|(seq, ts, entry)| (seq, ts, crypto::seal(&self.vk, &log_aad(author, seq), entry.as_bytes())))
+            .collect())
+    }
+
+    /// For sync: keeps an activity entry another device wrote. Returns whether
+    /// it was new. One that does not open under the vault key is refused.
+    pub(crate) fn keep_log(&self, conn: &Connection, author: &str, seq: u64, ts_ms: u64, sealed: &[u8]) -> Result<bool> {
+        if author == self.device_id {
+            return Ok(false);
+        }
+        let plain = crypto::open(&self.vk, &log_aad(author, seq), sealed)?;
+        let entry: AuditEntry = serde_json::from_slice(&plain)?;
+        if ts_ms < now_ms().saturating_sub(LOG_KEPT_MS) {
+            return Ok(false);
+        }
+        let added = conn.execute(
+            "INSERT OR IGNORE INTO shared_log (author, seq, ts_ms, entry) VALUES (?1, ?2, ?3, ?4)",
+            params![author, seq, ts_ms, serde_json::to_string(&entry)?],
+        )?;
+        Ok(added > 0)
     }
 }
 
@@ -1146,6 +1285,7 @@ mod tests {
             max_grant_secs: 600,
             kind: Kind::Secret,
             sites: vec![],
+            folder: None,
         }
     }
 
@@ -1158,6 +1298,7 @@ mod tests {
             max_grant_secs: 600,
             kind: Kind::Login,
             sites: sites.iter().map(|s| s.to_string()).collect(),
+            folder: None,
         }
     }
 
@@ -1267,7 +1408,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault = vault(&dir);
         let first = vault.put(item("TOKEN", Level::Biometric, "x")).unwrap();
-        let meta = vault.update_rules("TOKEN", vec!["make *".into()], 60, vec![]).unwrap();
+        let meta = vault.update_rules("TOKEN", vec!["make *".into()], 60, vec![], Some(" Work ".into())).unwrap();
         assert!(meta.version > first.version);
         assert_eq!(meta.max_grant_secs, 60);
         let stored = vault.meta("TOKEN").unwrap();
@@ -1324,12 +1465,12 @@ mod tests {
         }
 
         // Websites change without the values, and stay checked.
-        let moved = vault.update_rules("github", vec![], 60, vec!["gitlab.com".into()]).unwrap();
+        let moved = vault.update_rules("github", vec![], 60, vec!["gitlab.com".into()], None).unwrap();
         assert_eq!(moved.sites, ["gitlab.com"]);
-        assert!(vault.update_rules("github", vec![], 60, vec![]).is_err());
-        assert!(vault.update_rules("github", vec!["x".into()], 60, vec!["a.com".into()]).is_err());
+        assert!(vault.update_rules("github", vec![], 60, vec![], None).is_err());
+        assert!(vault.update_rules("github", vec!["x".into()], 60, vec!["a.com".into()], None).is_err());
         vault.put(item("TOKEN", Level::Log, "x")).unwrap();
-        assert!(vault.update_rules("TOKEN", vec![], 60, vec!["a.com".into()]).is_err());
+        assert!(vault.update_rules("TOKEN", vec![], 60, vec!["a.com".into()], None).is_err());
     }
 
     #[test]
@@ -1489,6 +1630,7 @@ mod tests {
         ] {
             vault
                 .audit(&AuditEntry {
+                    ts_ms: now_ms(),
                     event: "request".into(),
                     outcome: outcome.into(),
                     requester,
@@ -1498,6 +1640,9 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(vault.revoke_requester(&machine.id).unwrap(), Some(vec!["L1".to_string()]));
+        let notes: Vec<(String, String)> =
+            vault.meta("L1").unwrap().rotate.into_iter().map(|n| (n.who, n.why)).collect();
+        assert_eq!(notes, [("phone".into(), "removed".into()), ("vm".into(), "revoked".into())], "flagged for both");
     }
 
     #[test]

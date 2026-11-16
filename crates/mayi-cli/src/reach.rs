@@ -153,7 +153,8 @@ fn open_at(address: String, port: u16, private: &[u8; 32], device: &Device) -> i
     write_frame(&mut writer, &ClientMsg::Peers)?;
     let (peers, active) = match read_frame::<_, ServerMsg>(&mut reader)? {
         Some(ServerMsg::Peers { devices, sender_active, .. }) => (devices, sender_active),
-        Some(ServerMsg::Error { message }) => return Err(io::Error::other(message)),
+        // The device answered, and refuses this machine: no point trying again.
+        Some(ServerMsg::Error { message }) => return Err(io::Error::new(io::ErrorKind::PermissionDenied, message)),
         _ => return Err(io::Error::other("unexpected reply from the vault device")),
     };
     stream.set_read_timeout(None)?;
@@ -185,11 +186,13 @@ fn open_remote(device: &Device, private: &[u8; 32]) -> io::Result<Open> {
         });
     }
     drop(found);
+    // The device's own refusal says more than an address that did not answer.
     let mut last = io::Error::new(io::ErrorKind::NotFound, "no address known");
     for result in results {
         match result {
             Ok(open) => return Ok(open),
-            Err(e) => last = e,
+            Err(e) if last.kind() != io::ErrorKind::PermissionDenied => last = e,
+            Err(_) => {}
         }
     }
     Err(last)
@@ -204,6 +207,9 @@ enum Target {
 enum Event {
     Connected(usize, Open),
     Unreached(usize, String),
+    /// The device answered and refuses this machine (it is not paired, or
+    /// was revoked): it is not tried again.
+    Refused(usize, String),
     /// A message from an asked device, or `None` once its connection closed.
     Reply(usize, Option<ServerMsg>),
 }
@@ -382,9 +388,10 @@ impl Search {
             };
             let event = match result {
                 Ok(open) => Event::Connected(idx, open),
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Event::Refused(idx, e.to_string()),
                 Err(e) => Event::Unreached(idx, e.to_string()),
             };
-            let done = matches!(event, Event::Connected(..));
+            let done = matches!(event, Event::Connected(..) | Event::Refused(..));
             if events.send(event).is_err() || done {
                 return;
             }
@@ -510,6 +517,21 @@ impl Search {
             .join("; ")
     }
 
+    /// Why no device will take requests, when each has refused or failed.
+    fn refusal(&self) -> String {
+        let details = self
+            .slots
+            .iter()
+            .map(|s| format!("{}: {}", s.name, s.last_error.as_deref().unwrap_or("unavailable")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if self.slots.iter().any(|s| s.last_error.as_deref() == Some("this machine is not paired")) {
+            format!("this machine is not paired with your vault, or was revoked ({details}). Pair it again with `mayi pair`.")
+        } else {
+            format!("no vault device can take the request: {details}")
+        }
+    }
+
     fn waiting_line(&self, until: Instant) -> String {
         let until = now_secs() + until.saturating_duration_since(Instant::now()).as_secs();
         let devices: Vec<String> = self.slots.iter().filter(|s| !s.out).map(Slot::described).collect();
@@ -572,6 +594,10 @@ pub fn ask(request: &RunRequest, remote_only: bool, wait: Duration, timeout: Dur
             Ok(Event::Unreached(idx, error)) => {
                 search.slots[idx].tried = true;
                 search.slots[idx].last_error = Some(error);
+            }
+            Ok(Event::Refused(idx, error)) => {
+                search.slots[idx].last_error = Some(error);
+                search.drop_slot(idx);
             }
             // A device that dropped the request on its own (it lost track of
             // the connection, say while the phone slept) has not answered:
@@ -716,9 +742,7 @@ pub fn ask(request: &RunRequest, remote_only: bool, wait: Duration, timeout: Dur
                     format!("none of your devices could be reached within {}: {}", minutes(wait), search.unreachable()),
                 ));
             }
-            None if !search.reachable() => {
-                return Err((EXIT_UNAVAILABLE, format!("no vault device can take the request: {}", search.unreachable())));
-            }
+            None if !search.reachable() => return Err((EXIT_UNAVAILABLE, search.refusal())),
             _ => {}
         }
     }
@@ -742,7 +766,14 @@ pub fn any(remote_only: bool, wait: Duration) -> Result<Channel, Failure> {
                 search.slots[idx].tried = true;
                 search.slots[idx].last_error = Some(error);
             }
+            Ok(Event::Refused(idx, error)) => {
+                search.slots[idx].last_error = Some(error);
+                search.drop_slot(idx);
+            }
             _ => {}
+        }
+        if !search.reachable() {
+            return Err((EXIT_UNAVAILABLE, search.refusal()));
         }
         let everyone_tried = search.slots.iter().all(|s| s.tried || s.out);
         if !waiting_said && everyone_tried && search.slots.iter().all(|s| s.conn.is_none()) {

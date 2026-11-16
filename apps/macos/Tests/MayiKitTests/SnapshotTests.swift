@@ -51,7 +51,7 @@ import Testing
             dark: false)
         let stored = SecretRecord(
             name: "github", level: 3, fields: ["password", "totp", "username"], allow: [], maxGrantSecs: 600,
-            version: 1, login: true, sites: ["github.com"], copies: 2)
+            version: 1, login: true, sites: ["github.com"], copies: 2, folder: nil, rotate: [])
         var shown = SecretDraft(editing: stored)
         shown.show(RevealedSecret(fields: [
             RevealedField(name: "password", value: "correct horse"), RevealedField(name: "totp", value: "JBSWY3DPEHPK3PXP"),
@@ -60,6 +60,19 @@ import Testing
         try await snapshot(
             SecretEditor(existing: stored, draft: shown, onSave: { _ in nil }, onCancel: {}), name: "login-shown",
             dark: false)
+    }
+
+    @Test func rotationAndFolders() async throws {
+        let flagged = SecretRecord(
+            name: "GITHUB_TOKEN", level: 3, fields: ["value"], allow: ["gh *"], maxGrantSecs: 900, version: 3,
+            login: false, sites: [], copies: 2, folder: "Work",
+            rotate: [RotateNoteRecord(who: "Mac mini (test)", why: "revoked", atMs: UInt64(Date().timeIntervalSince1970 * 1000))])
+        try await snapshot(SecretRow(secret: flagged).frame(width: 520).padding(), name: "row-rotate", dark: false)
+        try await snapshot(
+            SecretEditor(
+                existing: flagged, folders: ["Personal", "Work"], onDismissRotation: { nil }, onSave: { _ in nil },
+                onCancel: {}),
+            name: "editor-rotate", dark: false)
     }
 
     @Test func notices() async throws {
@@ -76,7 +89,7 @@ import Testing
     @Test func editor() async throws {
         let stored = SecretRecord(
             name: "PROD_DB", level: 4, fields: ["password", "user"], allow: ["psql *", "pg_dump *"],
-            maxGrantSecs: 300, version: 2, login: false, sites: [], copies: 1)
+            maxGrantSecs: 300, version: 2, login: false, sites: [], copies: 1, folder: nil, rotate: [])
         try await snapshot(
             SecretEditor(
                 existing: stored, error: "Changing the level re-encrypts the secret, so enter its values again.",
@@ -129,7 +142,8 @@ import Testing
             paths: MayiPaths(
                 home: dir.appendingPathComponent("home"), socket: dir.appendingPathComponent("s.sock").path),
             deviceName: "test")
-        _ = model.saveSecret(name: "GITHUB_TOKEN", level: 2, values: ["value": "x"], allow: ["gh *"], maxGrantSecs: 900)
+        _ = model.saveSecret(
+            name: "GITHUB_TOKEN", level: 2, values: ["value": "x"], allow: ["gh *"], maxGrantSecs: 900, folder: "Work")
         _ = model.saveSecret(name: "PROD_DB", level: 4, values: ["value": "x"], allow: [], maxGrantSecs: 300)
         _ = NSApplication.shared
         let window = MainWindow.make(model: model)
@@ -158,7 +172,7 @@ import Testing
         _ = model.saveSecret(name: "AWS_SECRET_ACCESS_KEY", level: 3, values: ["value": "x"], allow: [], maxGrantSecs: 900)
         _ = model.saveSecret(
             name: "PROD_DB", level: 4, values: ["user": "x", "password": "y"], allow: ["psql *"], maxGrantSecs: 300)
-        _ = model.saveSecret(name: "NPM_TOKEN", level: 1, values: ["value": "x"], allow: [], maxGrantSecs: 900)
+        _ = model.saveSecret(name: "NPM_TOKEN", level: 1, values: ["value": "x"], allow: [], maxGrantSecs: 900, folder: "Work")
         _ = model.saveSecret(
             name: "github", level: 3, values: ["username": "amine", "password": "x", "totp": "JBSWY3DPEHPK3PXP"],
             allow: [], maxGrantSecs: 600, login: true, sites: ["github.com"])

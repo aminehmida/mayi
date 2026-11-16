@@ -123,6 +123,14 @@ with the QR button. The phone scans it with the camera. Each view is listed in
 Activity. An orange dot next to a secret means it is only on this Mac: it
 gets a second copy when another of your devices syncs.
 
+Search the Secrets list by name, website or folder. A secret can go in one
+folder, typed or picked when you add or edit it; folders appear in the
+sidebar on the Mac and as filters above the list on the phone.
+
+Activity is shared: each device sends what it recorded to the others when
+they sync, so any of them shows every request, which machine made it, and
+which device answered. Entries are kept for 90 days.
+
 Mayi lives in the menu bar, and in the Dock while one of its windows is
 open. Opening it from Finder or Spotlight shows its window, which helps when
 the notch hides the menu-bar icon. It starts at login; "Open at Login" in its
@@ -209,8 +217,10 @@ ask your other devices" turns that off.
 No push service is involved, Google's or anyone's: a machine connects to the
 phone directly, over the same network or [Tailscale](https://tailscale.com).
 
-The phone app does what the Mac app does: add, view and edit secrets and logins (values show after your fingerprint, and an orange dot marks a secret that is only on this phone),
-pair machines, add and remove devices, and make a recovery key. It starts
+The phone app does what the Mac app does: add, view, search and file secrets
+and logins (values show after your fingerprint, and an orange dot marks a
+secret that is only on this phone), pair machines, add and remove devices,
+and make a recovery key. Tapping a request's notification opens it. It starts
 serving again after the phone restarts, and warns when notifications are
 off or Android may stop it in the background, since requests could not reach
 you. It needs no Google services: the QR scanner uses the camera directly.
@@ -233,13 +243,12 @@ For requests to reach the phone while it sleeps:
 
 ## For agents
 
-- **With a shell:** give the agent `skill/mayi/SKILL.md` (for Claude Code,
-  copy the `skill/mayi` folder into `~/.claude/skills/`). It teaches the
-  `mayi run` syntax and the rules: narrow requests, readable commands, never
-  extract a value, a denial is final.
-- **Without a shell:** `mayi mcp` is an MCP server on stdin/stdout with three
-  tools, `list_secrets`, `run_with_secrets` and `fill_login`. None returns a
-  value.
+Give the agent `skill/mayi/SKILL.md` (for Claude Code, copy the `skill/mayi`
+folder into `~/.claude/skills/`; it is also in the app, under
+`Mayi.app/Contents/Resources/skill`). It teaches the `mayi run` syntax and the
+rules: narrow requests, readable commands, never extract a value, a denial is
+final. Agents use Mayi through their shell; there is no MCP server, as it
+would hand apps without a shell a way to run commands on your Mac.
 
 ## If something is lost
 
@@ -248,8 +257,11 @@ For requests to reach the phone while it sleeps:
   after its fingerprints changed) is restored at next launch. Anyone holding
   it and a copy of the vault file can read everything, so keep it offline.
 - **A device or machine you no longer trust:** remove or revoke it in the
-  app. Mayi lists the secrets it could read or was given; rotate those at
-  their source, because removal cannot take back what was already seen.
+  app. Each secret it could read or was given gets a ⚠️ on every device;
+  open the secret to see who may still have it. Replace the value at its
+  source, because removal cannot take back what was already seen, and save
+  the new value: that clears the warning. Dismiss it if the value needs no
+  replacing.
 
 ## Without the app
 

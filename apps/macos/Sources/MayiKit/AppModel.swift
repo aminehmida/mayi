@@ -501,13 +501,13 @@ public final class AppModel: ObservableObject {
     /// Creates or replaces a secret or a login. Returns an error message on failure.
     public func saveSecret(
         name: String, level: UInt8, values: [String: String], allow: [String], maxGrantSecs: UInt64,
-        login: Bool = false, sites: [String] = []
+        login: Bool = false, sites: [String] = [], folder: String? = nil
     ) -> String? {
         guard let device else { return "The vault is not open." }
         do {
             _ = try device.putSecret(
                 name: name, level: level, values: values, allow: allow, maxGrantSecs: maxGrantSecs, login: login,
-                sites: sites)
+                sites: sites, folder: folder)
             refresh()
             syncNow()
             return nil
@@ -516,7 +516,6 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    /// Changes the allowed commands or websites and the approval lifetime, keeping the values.
     /// A secret's values for its owner to see, after Touch ID or the login
     /// password; for a level 4 secret, the check that unlocks it does that.
     /// Logged in Activity.
@@ -539,10 +538,15 @@ public final class AppModel: ObservableObject {
         return result
     }
 
-    public func updateRules(name: String, allow: [String], maxGrantSecs: UInt64, sites: [String] = []) -> String? {
+    /// Changes the allowed commands or websites, the approval lifetime and
+    /// the folder, keeping the values.
+    public func updateRules(
+        name: String, allow: [String], maxGrantSecs: UInt64, sites: [String] = [], folder: String? = nil
+    ) -> String? {
         guard let device else { return "The vault is not open." }
         do {
-            _ = try device.updateRules(name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites)
+            _ = try device.updateRules(
+                name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites, folder: folder)
             refresh()
             syncNow()
             return nil
@@ -550,6 +554,22 @@ public final class AppModel: ObservableObject {
             return describe(error)
         }
     }
+
+    /// The owner decided a secret flagged for rotation needs none.
+    public func dismissRotation(name: String) -> String? {
+        guard let device else { return "The vault is not open." }
+        do {
+            _ = try device.dismissRotation(name: name)
+            refresh()
+            syncNow()
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// The folders in use, sorted.
+    public var folders: [String] { Array(Set(secrets.compactMap(\.folder))).sorted() }
 
     public func deleteSecret(name: String) -> String? {
         guard let device else { return "The vault is not open." }

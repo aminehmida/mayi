@@ -7,7 +7,6 @@ mod cdp;
 mod config;
 mod fill;
 mod mask;
-mod mcp;
 mod reach;
 mod session;
 
@@ -141,8 +140,6 @@ enum Cmd {
         #[arg(long)]
         headless: bool,
     },
-    /// Serve the Model Context Protocol on stdin/stdout, for agents without a shell
-    Mcp,
 }
 
 /// An open conversation with a vault device, local or through a tunnel.
@@ -436,7 +433,6 @@ fn main() -> ExitCode {
             code_selector,
         }),
         Cmd::Browser { port, headless } => browser::start(port, headless),
-        Cmd::Mcp => mcp::serve().map(|()| 0).map_err(|e| (EXIT_UNAVAILABLE, e.to_string())),
     };
     match result {
         Ok(code) => ExitCode::from(code),

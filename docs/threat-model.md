@@ -52,8 +52,7 @@ can mislead an owner who does not read the command.
 ### Leaks into the model's context, transcripts and logs
 
 The value never appears in the agent's tool input or output: the agent sends
-a name, and reads masked output. The audit log and the MCP server never
-contain values.
+a name, and reads masked output. The audit log never contains values.
 
 **Limits.** A command that prints its secret in an encoding the masker does
 not know leaks it into the transcript.
@@ -142,11 +141,24 @@ Android's clipboard preview skip it.
   one invalidates the key), or on a Mac Touch ID, a paired watch or the
   login password.
 - Removing the device from the vault stops it syncing and receiving new
-  level 4 secrets, and lists what it could read.
+  level 4 secrets, and marks each secret it could read with a warning on
+  every device until the value is replaced or the warning dismissed.
+  Revoking a machine does the same for the secrets it was given.
 
 **Limits.** Removal is not erasure. A removed device keeps what it already
-had, and the vault key does not change, so the listed secrets must be rotated
-at their source.
+had, and the vault key does not change, so the marked secrets must be
+rotated at their source.
+
+### The shared activity log
+
+Every device holds the activity of all of them for 90 days: the commands,
+websites, reasons and agent names, which machine asked and the outcome,
+never a value. It is sealed under the vault key like the secrets, so it
+travels only between the vault's devices. A device that is stolen and
+unlocked therefore shows what was asked on the others too, and a removed
+device keeps the activity it had. Entries are sealed, not signed: a device
+of the vault could add entries in another device's name, though an entry a
+device already holds is never replaced.
 
 ### Loss of every device
 

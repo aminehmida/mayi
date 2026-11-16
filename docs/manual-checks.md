@@ -32,7 +32,7 @@ Below, `mayi` is `apps/macos/build/Mayi.app/Contents/Resources/mayi`.
       long-running command (`-- sleep 30`) and the notice says it was stopped.
 - [x] Secrets window: add, edit rules without re-entering values, replace
       values, delete. The Activity tab lists what happened.
-- [ ] Quitting and reopening the app keeps the secrets.
+- [x] Quitting and reopening the app keeps the secrets.
 
 ## Other machines (milestone 3)
 
@@ -40,19 +40,24 @@ Automated tests paired the CLI with the app's model over loopback, and a
 static Linux binary in a container with the dev daemon on the Mac, with a
 packet capture showing no plaintext. Still to do by hand:
 
-- [ ] In the app, Machines → "Pair a Machine…" asks for Touch ID, then shows
+- [x] In the app, Machines → "Pair a Machine…" asks for Touch ID, then shows
       the command. Cancelling Touch ID shows "Pairing needs your fingerprint."
-- [ ] The first pairing opens TCP port 7462. If the macOS firewall is on, it
+      (Since alpha.6 the app asks once when it opens, not per action.)
+- [x] The first pairing opens TCP port 7462. If the macOS firewall is on, it
       asks whether Mayi may accept incoming connections: allow it.
-- [ ] Pair a real machine over Tailscale: copy `mayi` to it
+      (Reached over Tailscale from another Mac.)
+- [x] Pair a real machine over Tailscale: copy `mayi` to it
       (`scripts/build-linux.sh`), paste the command, and check it appears in
       the Machines tab. The token lists this Mac's IPv4 addresses, including
       its Tailscale address.
-- [ ] From that machine, a level 1 secret shows a notice naming the machine,
+- [x] From that machine, a level 1 secret shows a notice naming the machine,
       and a level 3 secret shows the approval panel with "Another machine".
-- [ ] Revoke the machine; its next request fails with "this machine is not paired".
-- [ ] With the Mac asleep or the app closed, a request from the machine fails
+- [x] Revoke the machine; its next request fails with "this machine is not paired".
+      (Found: alpha.7 kept retrying and blamed a timed-out address; alpha.8
+      stops at once and says the machine is not paired.)
+- [x] With the Mac asleep or the app closed, a request from the machine fails
       within a few seconds with "no vault device reachable".
+      (Since alpha.4 it waits for any of your devices instead; the phone answers.)
 
 ## Several devices and Android (milestone 4)
 
@@ -72,16 +77,17 @@ An emulator has no secure hardware and never sleeps, so these remain:
 
 ### On a real Android phone
 
-- [ ] `apps/android/build-core.sh && cd apps/android && ./gradlew installDebug`.
+- [x] `apps/android/build-core.sh && cd apps/android && ./gradlew installDebug`.
       On a real phone the keys must land in secure hardware; the app refuses
       to set up otherwise. (On the emulator a debug build accepts software
       keys, which is the only reason it could be tested there.)
-- [ ] Join the Mac app's vault by scanning the QR code from Devices → "Add a
+      (Installed from the release APK; level 4 works with the phone's fingerprint.)
+- [x] Join the Mac app's vault by scanning the QR code from Devices → "Add a
       Device…". The emulator test pasted the text and used the dev daemon,
       so the scanner and the Mac app's side of this are untested.
 - [ ] After adding or removing a fingerprint on the phone, level 4 secrets
       can no longer be unlocked on it (by design).
-- [ ] The phone still answers after several minutes with the screen off.
+- [x] The phone still answers after several minutes with the screen off.
       (See "Reaching your devices without Google" below.)
 - [ ] The emulator, its Android 15 image and the virtual device `mayi` take
       about 6 GB. Remove them when no longer needed with
@@ -90,24 +96,27 @@ An emulator has no secure hardware and never sleeps, so these remain:
 
 ## Agents, recovery and revocation (milestone 5)
 
-Automated tests cover the MCP server against a live daemon, creating a
-recovery key and recovering after the device keys were deleted, and the
-rotation lists. Still to do by hand:
+Automated tests cover creating a recovery key and recovering after the
+device keys were deleted, and the rotation lists. Still to do by hand:
 
-- [ ] Copy `skill/mayi` to `~/.claude/skills/` and ask Claude Code to do
+- [x] Copy `skill/mayi` to `~/.claude/skills/` and ask Claude Code to do
       something that needs a secret. Check it uses `mayi run` with a sensible
       reason, and that it does not retry after you deny.
-- [ ] Add `mayi mcp` as an MCP server to a client (command: the path to
-      `mayi`, argument: `mcp`) and call both tools.
-- [ ] In the Mac app, Devices → "Recovery Key…" (Touch ID) shows a key once.
+- [x] The MCP server (`mayi mcp`) was removed in alpha.8: agents use the
+      shell, and an MCP tool would give apps without one a way to run
+      commands.
+- [x] In the Mac app, Devices → "Recovery Key…" (Touch ID) shows a key once.
       Store it for the next check.
-- [ ] Recovery for real: quit the app, move
+- [x] Recovery for real (found: the key field wrapped and Command-V did not
+      paste, as the app had no Edit menu; fixed for alpha.8). Quit the app, move
       `~/Library/Application Support/Mayi/keys` aside, relaunch. The app
       should say it can no longer open the vault and accept the recovery key.
       Level 4 secrets should work again afterwards.
 - [ ] Removing a device and revoking a machine each show which secrets to rotate.
-- [ ] The Android app has no screen for the recovery key or for recovering;
+      (Revoking: done. Removing a device: not tried on your real phone.)
+- [x] The Android app has no screen for the recovery key or for recovering;
       on a phone, recovery means joining again from another device.
+      (Out of date: since alpha.3 the phone makes recovery keys; recovering a phone means joining again.)
 
 ## Website logins
 
@@ -122,14 +131,14 @@ sign-in, and on the emulator the phone approved a three-page sign-in and a
 level 4 one with a fingerprint. Two public practice sites were signed in to.
 Still to do by hand:
 
-- [ ] Sign in to a real account of yours that has two-factor, for example
+- [x] Sign in to a real account of yours that has two-factor, for example
       GitHub: add the login in the app (scan or paste the two-factor key when
       you set it up), then `mayi browser` and `mayi fill`.
-- [ ] The same from a real agent: Claude Code with Playwright MCP started as
+- [x] The same from a real agent: Claude Code with Playwright MCP started as
       `npx @playwright/mcp@latest --cdp-endpoint http://127.0.0.1:9222`, the
       skill installed, and a task that needs the sign-in.
-- [ ] Level 4 sign-in with Touch ID on the Mac, and with a real phone.
-- [ ] The QR scanner for a two-factor key on a real phone.
+- [x] Level 4 sign-in with Touch ID on the Mac, and with a real phone.
+- [x] The QR scanner for a two-factor key on a real phone.
 - [ ] `mayi fill` on a Linux machine or container with its own Chromium. I
       built the static binaries, but Docker Desktop did not start for me (it
       seemed to wait on something in its window, which is still open).
@@ -143,13 +152,13 @@ Both apps now use their platform's own components (`docs/design-language.md`).
 The Mac main window was captured as a real window in tests, and the Android
 app was run on the emulator. Not yet tried by hand on the Mac:
 
-- [ ] The approval panel: the "Allow for This Session" pull-down opens and
+- [x] The approval panel: the "Allow for This Session" pull-down opens and
       works even though the panel never takes keyboard focus.
-- [ ] The toolbar buttons (edit, delete, add) and double-click to edit in the
+- [x] The toolbar buttons (edit, delete, add) and double-click to edit in the
       Secrets list.
-- [ ] The menu-bar icon (the logo as a template) at real size, and the app
+- [x] The menu-bar icon (the logo as a template) at real size, and the app
       icon in the Dock and Finder.
-- [ ] On Android, the launcher icon and the themed (monochrome) icon.
+- [x] On Android, the launcher icon and the themed (monochrome) icon.
 
 ## The first release (v0.1.0-alpha.1)
 
@@ -174,12 +183,13 @@ emulator (with a fingerprint for a level 4 secret, the dev daemon playing
 the new device), and refusals of codes used the wrong way round. Still to do
 by hand:
 
-- [ ] Your case: on the Mac, Devices, "Join Another Vault…", then on the phone
+- [x] Your case: on the Mac, Devices, "Join Another Vault…", then on the phone
       Devices, "Add device", scan the Mac's code. The Mac should open with the
       phone's secrets. (This needs both updated to alpha.2.)
 - [ ] The Mac's first launch with no vault shows the setup window, and
       "Create New Vault…" still works.
-- [ ] Scanning with the phone's camera (the emulator could only type the code).
+- [x] Scanning with the phone's camera (the emulator could only type the code).
+      (Done for a two-factor key.)
 
 ## Fixes from the experience review (v0.1.0-alpha.3)
 
@@ -195,11 +205,11 @@ real Secure Enclave). Still to do by hand:
 
 - [ ] On the MacBook, with the lid closed on a display: Add a Device,
       Pair a Machine and a level 4 secret each accept your password.
-- [ ] Mayi appears in the Dock while its window is open and leaves it when
+- [x] Mayi appears in the Dock while its window is open and leaves it when
       the window closes; opening Mayi from Spotlight shows the window; it is
       in System Settings, General, Login Items, and "Open at Login" in its
       menu turns that off.
-- [ ] In a real Claude Code session, "Allow for This Session" covers the
+- [x] In a real Claude Code session, "Allow for This Session" covers the
       next commands, and the prompt names the session `claude (pid …)`.
 - [ ] On the phone: restart it and, without opening Mayi, use a paired
       machine; the QR codes it shows scan from another phone.
@@ -212,7 +222,7 @@ each device and when it was last reached, asks the device in use first and
 the other only after 30 seconds, takes the first answer and takes the other
 prompt down, times out from when a device had the request, and, from a
 machine with a vault device, pairs itself through the socket and reaches the
-other device. An MCP call reports what it waits for as progress.
+other device.
 
 On the emulator: the APK holds no Firebase, Play services or ML Kit code;
 setup asks to run in the background and the banner offers it until allowed;
@@ -231,10 +241,10 @@ connection holds the phone awake for 30 seconds; the camera scanner opens
       and the maker's own setting from dontkillmyapp.com, Mayi keeps serving.
 - [x] An agent on the MacBook while you are away with the phone: the phone
       asks; while you are typing on the Mac, only the Mac asks.
-- [ ] Answering from a phone whose screen was off: pulling down the
+- [x] Answering from a phone whose screen was off: pulling down the
       notification used to drop the request on both devices (found in
-      alpha.6, fixed in alpha.7); retest.
-- [ ] In Claude Code, a long `mayi run` started in the background with a
+      alpha.6, fixed in alpha.7, retested).
+- [x] In Claude Code, a long `mayi run` started in the background with a
       75-minute timeout wakes the agent when you answer.
 
 ## Viewing secrets and single copies
@@ -255,13 +265,45 @@ dot, the fingerprint prompt, the shown value with its copy button, and the
       ignores the sensitive flag; left as is, by your choice.)
 - [x] Add a secret on the Mac: its orange dot goes once the phone has synced,
       and the phone shows no dot for it.
-- [ ] Opening Mayi asks once (Touch ID or password on the MacBook, a
+- [x] Opening Mayi asks once (Touch ID or password on the MacBook, a
       fingerprint on the phone); after that, showing values and pairing ask
       nothing until the Mac locks or the phone's screen goes off. Opening the
       phone app from a request notification does not ask.
-- [ ] A shown login's two-factor code matches your authenticator app, and the
+- [x] A shown login's two-factor code matches your authenticator app, and the
       site accepts it; replacing the key by pasting a QR code on the Mac and
       by scanning on a real phone both work.
+
+## Folders, search, rotation warnings and shared activity (v0.1.0-alpha.8)
+
+Automated tests cover activity reaching every device (in batches of 300,
+none sent to a device from before alpha.8), rotation notes set by removing a
+device or revoking a machine, synced, cleared by a new value and dismissed,
+and folders kept through rule changes, in Rust, Swift and on the JVM. On the
+emulator: search and the folder filters, folder suggestions, the ⚠️ row and
+its card with Dismiss after revoking a machine, the amber "From doze-test"
+chip on a request, a request notification opening the Requests tab from the
+Secrets tab, and the camera picture inside the scanner opened from the edit
+sheet. On the Mac, snapshots of the folder sidebar, the ⚠️ row and the
+editor scrolled to its warning. Still to do by hand:
+
+- [ ] Mayi asks for Touch ID or your password as soon as it opens, without
+      opening its window first.
+- [ ] The recovery key field stays on one line, and Command-V pastes into it.
+- [ ] A request on the Mac shows the machine's name in an orange capsule,
+      large enough to notice; the phone shows the same.
+- [ ] Tapping a request's notification on your phone opens the request,
+      whichever tab Mayi was on.
+- [ ] Scanning a two-factor QR code from the phone's edit sheet shows the
+      camera picture.
+- [ ] Revoke a machine that was given a secret: the secret shows ⚠️ on both
+      the Mac and the phone; its warning explains what to do; saving a new
+      value clears it everywhere; Dismiss clears it too.
+- [ ] Put secrets in folders on one device: the other shows the same
+      folders after a sync. Search finds a secret by name, website or folder.
+- [ ] Activity on the phone lists a request answered on the Mac ("answered
+      on …"), and the Mac lists one answered on the phone, after a sync. A
+      prompt taken down because the other device answered does not appear
+      twice.
 
 ## Decisions waiting for you
 

@@ -255,7 +255,9 @@ belong to a device of the vault that has not been removed.
 
 1. Caller: `digest`, mapping each record (`member:<id>`, `item:<id>`,
    `requester:<id>`) to its stamp `{version, author}` and, for items, the set
-   of recipients its data key is wrapped to.
+   of recipients its data key is wrapped to; and, for every device of the
+   vault, `log:<id>` with the number of the newest activity entry it holds
+   from that device (0 for none).
 2. Callee: `reply` with its own digest and the records the caller lacks.
 3. Caller: `records` with the records the callee lacks.
 4. Callee: `done`.
@@ -275,8 +277,22 @@ item at the same stamp) lacks some wraps. On receipt:
 - Two secrets created with the same name on different devices both survive
   in the file; every device shows the one with the higher stamp.
 
-Deletions are records too (tombstones), so they propagate. The audit log and
-each device's tunnel key are not synced.
+Deletions are records too (tombstones), so they propagate. Each device's
+tunnel key is not synced.
+
+Activity is synced as `log` records: an entry from one device's audit log,
+numbered in order by that device and sealed under the vault key with the
+associated data `mayi/log/<device>/<number>`. A side sends the entries the
+other's `log:` markers show it lacks, oldest first and at most 300 per sync,
+so a long backlog arrives over several syncs. A device keeps others' entries
+apart from its own, ignores its own coming back, and drops any older than 90
+days, as it does its own. A device whose digest has no `log:` markers (from
+before alpha.8) is sent none.
+
+A secret's rules carry its folder and its rotation notes. Removing a device
+or revoking a machine adds a note (who, removed or revoked, when) to each
+secret it could read or was given; saving a new value clears the notes, and
+so does dismissing them. Both are changes to the item, so they sync as one.
 
 After a sync, each side records, for that device, the stamp of every item it
 now holds. A device counts an item's copies as itself, the device that wrote

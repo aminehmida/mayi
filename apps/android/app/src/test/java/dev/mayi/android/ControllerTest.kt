@@ -220,6 +220,27 @@ class ControllerTest {
         assertEquals(listOf("TOKEN"), phone.removeDevice(other.id).getOrThrow())
         assertTrue(phone.state.devices.first { it.name == "other phone" }.removed)
         assertEquals("one copy again", 1u, phone.state.secrets.single().copies)
+
+        // The removed device may still know the value: the secret says so
+        // until it is replaced, or its owner dismisses the note.
+        val note = phone.state.secrets.single().rotate.single()
+        assertEquals("other phone", note.who)
+        assertEquals("removed", note.why)
+        assertNull(phone.dismissRotation("TOKEN"))
+        assertTrue(phone.state.secrets.single().rotate.isEmpty())
+    }
+
+    @Test
+    fun foldersAreKeptWithTheRules() {
+        val (phone, _) = phone(TestKeys())
+        assertNull(phone.saveSecret("TOKEN", 3u, mapOf("value" to "abc"), emptyList(), 900u, folder = " Work "))
+        assertEquals("Work", phone.state.secrets.single().folder)
+        // Changing only the rules moves it, and an empty folder means none.
+        assertNull(phone.updateRules("TOKEN", emptyList(), 900u, emptyList(), "Personal"))
+        assertEquals("Personal", phone.state.secrets.single().folder)
+        assertNull(phone.updateRules("TOKEN", emptyList(), 900u, emptyList(), ""))
+        assertNull(phone.state.secrets.single().folder)
+        assertEquals("abc", phone.reveal("TOKEN").getOrThrow().fields.single().value)
     }
 
     @Test

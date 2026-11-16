@@ -10,11 +10,22 @@ import android.os.Bundle
 import android.provider.Settings
 import android.text.format.DateUtils
 import android.widget.Toast
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.SuggestionChip
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -113,6 +124,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.fragment.app.FragmentActivity
 import dev.mayi.ffi.ApprovalChoice
 import dev.mayi.ffi.AuditRecord
@@ -130,6 +143,8 @@ class MainActivity : FragmentActivity() {
     private val app get() = application as MayiApp
     /** Bumped on every resume, so screens re-check settings changed meanwhile. */
     private val resumes = androidx.compose.runtime.mutableIntStateOf(0)
+    /** Bumped when a notification asks to show the Requests tab. */
+    private val openRequests = androidx.compose.runtime.mutableIntStateOf(0)
     /** Where a scanned code goes, while the scanner is open. */
     private val scanning = mutableStateOf<((String) -> Unit)?>(null)
     private var scanAfterPermission: ((String) -> Unit)? = null
@@ -160,17 +175,31 @@ class MainActivity : FragmentActivity() {
                             ready = true
                         }
                         askBackground -> BackgroundStep(app, resumes) { askBackground = false }
-                        else -> Home(app, ::scan, resumes)
+                        else -> Home(app, ::scan, resumes, openRequests)
                     }
                     scanning.value?.let { onToken ->
-                        BackHandler { scanning.value = null }
-                        QrScanner(this@MainActivity, onCode = {
-                            scanning.value = null
-                            onToken(it)
-                        }, onCancel = { scanning.value = null })
+                        // A window of its own, so it shows above a sheet it was opened from.
+                        Dialog(
+                            onDismissRequest = { scanning.value = null },
+                            properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+                        ) {
+                            QrScanner(this@MainActivity, onCode = {
+                                scanning.value = null
+                                onToken(it)
+                            }, onCancel = { scanning.value = null })
+                        }
                     }
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_OPEN_REQUESTS, false)) {
+            scanning.value = null
+            openRequests.intValue++
         }
     }
 
@@ -487,7 +516,7 @@ private val tabs = listOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit, resumes: MutableIntState) {
+private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit, resumes: MutableIntState, openRequests: MutableIntState) {
     val controller = app.controller
     var state by remember { mutableStateOf(controller.state) }
     DisposableEffect(controller) {
@@ -500,6 +529,14 @@ private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit, resumes: Mutabl
     var adding by remember { mutableStateOf(false) }
     var addingDevice by remember { mutableStateOf(false) }
     val waiting = state.pending.size + state.notices.size
+    // A request's notification opens the Requests tab, closing what was open.
+    LaunchedEffect(openRequests.intValue) {
+        if (openRequests.intValue > 0) {
+            tab = 0
+            adding = false
+            addingDevice = false
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -645,7 +682,7 @@ private fun RequestCard(prompt: PromptInfo, onChoice: (ApprovalChoice) -> Unit) 
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 AppIcon(44.dp)
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         when {
                             site != null -> "Allow signing in to ${host(site)}?"
@@ -654,7 +691,7 @@ private fun RequestCard(prompt: PromptInfo, onChoice: (ApprovalChoice) -> Unit) 
                         },
                         style = MaterialTheme.typography.titleMedium,
                     )
-                    Text(origin(prompt.request), style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                    RequesterChip(prompt.request)
                 }
             }
             CodeWell(site ?: prompt.request.command)
@@ -742,15 +779,17 @@ private fun NoticeCard(active: MayiController.ActiveNotice, onStop: () -> Unit, 
                     site ?: active.notice.request.command, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
                     color = scheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    when {
-                        active.stopped -> "Stopped, and its session revoked"
-                        active.ended -> if (site != null) "Sign-in done" else "Command finished"
-                        else -> origin(active.notice.request)
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = scheme.onSurfaceVariant,
-                )
+                if (active.stopped || active.ended) {
+                    Text(
+                        if (active.stopped) "Stopped, and its session revoked"
+                        else if (site != null) "Sign-in done" else "Command finished",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                } else {
+                    Spacer(Modifier.height(4.dp))
+                    RequesterChip(active.notice.request, compact = true)
+                }
                 Spacer(Modifier.height(8.dp))
                 if (active.ended || active.stopped) {
                     OutlinedButton(onClick = onDismiss) { Text("Dismiss") }
@@ -806,14 +845,67 @@ private fun Secrets(
         }.start()
     }
 
+    var query by rememberSaveable { mutableStateOf("") }
+    var folder by rememberSaveable { mutableStateOf<String?>(null) }
+    val folders = remember(state.secrets) { folders(state.secrets) }
+    // A folder emptied meanwhile shows everything again.
+    val selected = folder?.takeIf { it in folders }
+    val shown = remember(state.secrets, query, selected) {
+        val words = query.lowercase().split(' ').filter { it.isNotEmpty() }
+        state.secrets.filter { secret ->
+            val text = (listOf(secret.name, secret.folder ?: "") + secret.sites + secret.fields).joinToString(" ").lowercase()
+            (selected == null || secret.folder == selected) && words.all { it in text }
+        }
+    }
+    val focus = LocalFocusManager.current
+
     if (state.secrets.isEmpty()) {
         EmptyState(Icons.Outlined.Key, "No secrets yet", "Add an API key, a token or a website login. An agent then uses it by name and never sees the value.")
     } else {
         LazyColumn {
+            item(key = "search") {
+                OutlinedTextField(
+                    query, { query = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    placeholder = { Text("Search secrets") }, singleLine = true, shape = CircleShape,
+                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                    trailingIcon = if (query.isEmpty()) null else ({
+                        IconButton(onClick = { query = "" }) { Icon(Icons.Outlined.Close, contentDescription = "Clear search") }
+                    }),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
+                )
+            }
+            if (folders.isNotEmpty()) {
+                item(key = "folders") {
+                    Row(
+                        Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FilterChip(selected = selected == null, onClick = { folder = null }, label = { Text("All") })
+                        for (name in folders) {
+                            FilterChip(
+                                selected = selected == name, onClick = { folder = if (selected == name) null else name },
+                                label = { Text(name) },
+                                leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null, Modifier.size(FilterChipDefaults.IconSize)) },
+                            )
+                        }
+                    }
+                }
+            }
             error?.let { message ->
                 item { Text(message, style = MaterialTheme.typography.bodyMedium, color = scheme.error, modifier = Modifier.padding(horizontal = 16.dp)) }
             }
-            items(state.secrets, key = { it.name }) { secret ->
+            if (shown.isEmpty()) {
+                item {
+                    Text(
+                        if (query.isEmpty()) "Nothing in $selected." else "No secret matches “${query.trim()}”" + (selected?.let { " in $it." } ?: "."),
+                        style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
+                    )
+                }
+            }
+            items(shown, key = { it.name }) { secret ->
+                val flagged = secret.rotate.isNotEmpty()
                 ListItem(
                     leadingContent = {
                         Icon(
@@ -823,6 +915,9 @@ private fun Secrets(
                     },
                     headlineContent = {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (flagged) {
+                                Icon(Icons.Filled.Warning, contentDescription = "Replace this value", tint = oneCopyColor, modifier = Modifier.size(18.dp))
+                            }
                             Text(
                                 secret.name, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false),
@@ -830,7 +925,13 @@ private fun Secrets(
                             if (secret.copies < 2u) OneCopyDot()
                         }
                     },
-                    supportingContent = { Text(summary(secret), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    supportingContent = {
+                        Text(
+                            if (flagged) "May be known to " + secret.rotate.joinToString { it.who } + ". Tap for what to do."
+                            else summary(secret),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    },
                     trailingContent = { LevelLabel(secret.level.toInt()) },
                     modifier = Modifier.clickable { detail = secret },
                 )
@@ -845,7 +946,7 @@ private fun Secrets(
             onDismissRequest = { setAdding(false) },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
-            AddSecret(scan = scan, existing = null, onCancel = { setAdding(false) }) { draft ->
+            AddSecret(scan = scan, existing = null, onCancel = { setAdding(false) }, folders = folders, folder = selected) { draft ->
                 val problem = save(controller, draft)
                 if (problem == null) setAdding(false)
                 problem
@@ -860,7 +961,8 @@ private fun Secrets(
             AddSecret(
                 scan = scan, existing = secret, onCancel = { editing = null },
                 reveal = { done -> reveal(secret, done) }, revealOnOpen = showing,
-                loadsAtOnce = app.unlocked && secret.level < 4u,
+                loadsAtOnce = app.unlocked && secret.level < 4u, folders = folders,
+                onDismissRotation = { controller.dismissRotation(secret.name) },
             ) { draft ->
                 val problem = save(controller, draft)
                 if (problem == null) editing = null
@@ -869,9 +971,9 @@ private fun Secrets(
         }
     }
     detail?.let { secret ->
-        ModalBottomSheet(onDismissRequest = { detail = null }) {
+        ModalBottomSheet(onDismissRequest = { detail = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
             Column(
-                Modifier.padding(horizontal = 24.dp).padding(bottom = 28.dp),
+                Modifier.padding(horizontal = 24.dp).padding(bottom = 28.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(secret.name, style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Monospace)
@@ -881,6 +983,12 @@ private fun Secrets(
                     style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
                 )
                 Text(summary(secret) + ".", style = MaterialTheme.typography.bodyMedium)
+                secret.folder?.let { name ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Outlined.Folder, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                        Text("In $name", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
+                    }
+                }
                 if (secret.copies < 2u) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OneCopyDot()
@@ -888,6 +996,12 @@ private fun Secrets(
                             "Only on this phone. It reaches your other devices when they next sync; add a device to keep a second copy.",
                             style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
                         )
+                    }
+                }
+                if (secret.rotate.isNotEmpty()) {
+                    RotationCard(secret.rotate) {
+                        error = controller.dismissRotation(secret.name)
+                        detail = controller.state.secrets.find { it.name == secret.name }
                     }
                 }
                 Spacer(Modifier.height(4.dp))
@@ -930,17 +1044,21 @@ private fun Secrets(
 /** What the add or edit sheet produces. [values] empty means keep the stored values. */
 private class NewSecret(
     val name: String, val level: UByte, val values: Map<String, String>, val allow: List<String>,
-    val maxGrantSecs: ULong, val login: Boolean, val sites: List<String>,
+    val maxGrantSecs: ULong, val login: Boolean, val sites: List<String>, val folder: String?,
 )
+
+/** The folders in use, sorted. */
+private fun folders(secrets: List<SecretRecord>) =
+    secrets.mapNotNull { it.folder }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
 
 private fun lines(text: String) = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
 /** Stores a draft: new values, or only the rules when no value was entered. */
 private fun save(controller: MayiController, draft: NewSecret): String? {
     val problem = if (draft.values.isEmpty()) {
-        controller.updateRules(draft.name, draft.allow, draft.maxGrantSecs, draft.sites)
+        controller.updateRules(draft.name, draft.allow, draft.maxGrantSecs, draft.sites, draft.folder)
     } else {
-        controller.saveSecret(draft.name, draft.level, draft.values, draft.allow, draft.maxGrantSecs, draft.login, draft.sites)
+        controller.saveSecret(draft.name, draft.level, draft.values, draft.allow, draft.maxGrantSecs, draft.login, draft.sites, draft.folder)
     }
     if (problem == null) Thread { controller.sync() }.start()
     return problem
@@ -963,6 +1081,12 @@ private fun AddSecret(
     revealOnOpen: Boolean = false,
     /** Load the values when the sheet opens, hidden behind their eyes: when that asks nothing. */
     loadsAtOnce: Boolean = false,
+    /** The folders in use, offered as suggestions. */
+    folders: List<String> = emptyList(),
+    /** The folder a new secret starts in. */
+    folder: String? = null,
+    /** Drops the note that this secret should be replaced; returns an error. */
+    onDismissRotation: (() -> String?)? = null,
     onSave: (NewSecret) -> String?,
 ) {
     val editing = existing != null
@@ -976,6 +1100,8 @@ private fun AddSecret(
     var twoFactor by remember { mutableStateOf("") }
     var level by remember { mutableIntStateOf(existing?.level?.toInt() ?: 3) }
     var maxGrant by remember { mutableStateOf(existing?.maxGrantSecs ?: 900uL) }
+    var folderText by remember { mutableStateOf(existing?.folder ?: folder ?: "") }
+    var rotationDismissed by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scheme = MaterialTheme.colorScheme
     val mono = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace)
@@ -1091,6 +1217,20 @@ private fun AddSecret(
                 placeholder = { Text(if (login) "github" else "GITHUB_TOKEN") }, textStyle = mono, singleLine = true,
             )
         }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedTextField(
+                folderText, { folderText = it }, Modifier.fillMaxWidth(), label = { Text("Folder (optional)") }, singleLine = true,
+                leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
+            )
+            // The folders in use that fit what is typed, one tap away.
+            val typed = folderText.trim()
+            val offered = folders.filter { it != typed && it.startsWith(typed, ignoreCase = true) }
+            if (offered.isNotEmpty()) {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (name in offered) SuggestionChip(onClick = { folderText = name }, label = { Text(name) })
+                }
+            }
+        }
         if (login) {
             OutlinedTextField(
                 sites, { sites = it }, Modifier.fillMaxWidth(), label = { Text("Websites, one per line") },
@@ -1189,6 +1329,12 @@ private fun AddSecret(
                 supportingText = { Text("An expected command skips the prompt at level 3. Any other command is asked about.") },
             )
         }
+        if (existing != null && existing.rotate.isNotEmpty() && !rotationDismissed) {
+            RotationCard(existing.rotate) {
+                val problem = onDismissRotation?.invoke()
+                if (problem == null) rotationDismissed = true else error = problem
+            }
+        }
         error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = scheme.error) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Spacer(Modifier.weight(1f))
@@ -1221,7 +1367,7 @@ private fun AddSecret(
                         else -> onSave(
                             NewSecret(
                                 name.trim(), level.toUByte(), values, if (login) emptyList() else lines(allow), maxGrant, login,
-                                if (login) lines(sites) else emptyList(),
+                                if (login) lines(sites) else emptyList(), folderText.trim().ifEmpty { null },
                             ),
                         )
                     }
@@ -1644,6 +1790,14 @@ private fun startOfDay(millis: Long): Long = Calendar.getInstance().apply {
     set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
 }.timeInMillis
 
+/** The agent, the machine it asked from, and which device answered when it was another one. */
+private fun whoAndWhere(entry: AuditRecord): String = when {
+    entry.remote && entry.device == null -> "${entry.agent}, from ${entry.requester}"
+    entry.remote -> "${entry.agent}, from ${entry.requester}, answered on ${entry.device}"
+    entry.device == null -> "${entry.agent}, on this phone"
+    else -> "${entry.agent}, on ${entry.device}"
+}
+
 @Composable
 private fun Activity(log: List<AuditRecord>) {
     val scheme = MaterialTheme.colorScheme
@@ -1652,7 +1806,11 @@ private fun Activity(log: List<AuditRecord>) {
         return
     }
     val time = remember { DateFormat.getTimeInstance(DateFormat.SHORT) }
-    val days = remember(log) { log.asReversed().groupBy { startOfDay(it.tsMs.toLong()) }.toList() }
+    // Another device's withdrawn prompts are left out: the request shows where it was answered.
+    val days = remember(log) {
+        log.asReversed().filter { !(it.device != null && it.outcome == "withdrawn") }
+            .groupBy { startOfDay(it.tsMs.toLong()) }.toList()
+    }
     LazyColumn {
         for ((day, entries) in days) {
             item(key = "day$day") {
@@ -1699,7 +1857,7 @@ private fun Activity(log: List<AuditRecord>) {
                                 request && withdrawn -> "Withdrawn: $names"
                                 request -> if (names.isEmpty()) "Request refused" else "Refused $names"
                                 entry.event == "stop" -> if (signIn) "Sign-in stopped by you" else "Command stopped by you"
-                                entry.event == "view" -> "You viewed $names on this phone"
+                                entry.event == "view" -> "You viewed $names on ${entry.device ?: "this phone"}"
                                 // A sign-in's "command" is the typing; its exit says whether that worked.
                                 signIn -> if (entry.outcome == "exit 0") "Sign-in submitted" else "Sign-in not completed"
                                 else -> "Command finished" + if (entry.outcome.startsWith("exit ")) ", ${entry.outcome}" else ""
@@ -1717,10 +1875,7 @@ private fun Activity(log: List<AuditRecord>) {
                                 }
                                 Text(if (signIn) entry.site else entry.command, fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 Text("Reason given: “${entry.reason}”", maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    "${entry.agent}, " + if (entry.remote) "from ${entry.requester}" else "on this phone",
-                                    style = MaterialTheme.typography.bodySmall, color = scheme.outline,
-                                )
+                                Text(whoAndWhere(entry), style = MaterialTheme.typography.bodySmall, color = scheme.outline)
                             }
                         }
                     },

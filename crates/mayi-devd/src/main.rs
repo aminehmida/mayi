@@ -209,7 +209,7 @@ fn add(args: AddArgs) -> Res<()> {
     }
     let level = Level::try_from(level)?;
     let kind = if login { Kind::Login } else { Kind::Secret };
-    let meta = vault.put(NewItem { name, level, values, allow, max_grant_secs: max_grant, kind, sites })?;
+    let meta = vault.put(NewItem { name, level, values, allow, max_grant_secs: max_grant, kind, sites, folder: None })?;
     let sites = if meta.sites.is_empty() { String::new() } else { format!(" for {}", meta.sites.join(", ")) };
     println!("Saved {}{sites} at level {} (version {})", meta.name, meta.level as u8, meta.version);
     Ok(())

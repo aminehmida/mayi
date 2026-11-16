@@ -562,6 +562,7 @@ mod tests {
                     max_grant_secs: 600,
                     kind: Kind::Secret,
                     sites: vec![],
+                    folder: None,
                 })
                 .unwrap();
         }
@@ -578,6 +579,7 @@ mod tests {
                     max_grant_secs: 600,
                     kind: Kind::Login,
                     sites: vec!["github.com".into(), "*.github.com".into()],
+                    folder: None,
                 })
                 .unwrap();
         }

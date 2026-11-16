@@ -74,6 +74,7 @@ fn device() -> Device {
                 max_grant_secs: 600,
                 kind: Kind::Secret,
                 sites: vec![],
+                folder: None,
             })
             .unwrap();
     }

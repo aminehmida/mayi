@@ -70,8 +70,25 @@ pub struct ItemMeta {
     /// its subdomains, each with an optional port. Empty for other secrets.
     #[serde(default)]
     pub sites: Vec<String>,
+    /// The folder the owner keeps it in, for the apps' lists. Agents use names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    /// Who may still know the value since a machine was revoked or a device
+    /// removed. Cleared by saving a new value, or dismissed by the owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rotate: Vec<RotateNote>,
     #[serde(skip)]
     pub version: u64,
+}
+
+/// Why a secret should be replaced at its source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotateNote {
+    /// The machine or device that may still know the value.
+    pub who: String,
+    /// `revoked` (a machine) or `removed` (a device).
+    pub why: String,
+    pub at_ms: u64,
 }
 
 pub struct NewItem {
@@ -82,4 +99,5 @@ pub struct NewItem {
     pub max_grant_secs: u64,
     pub kind: Kind,
     pub sites: Vec<String>,
+    pub folder: Option<String>,
 }

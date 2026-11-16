@@ -129,6 +129,8 @@ mod tests {
             fields: vec!["value".into()],
             kind: Default::default(),
             sites: vec![],
+            folder: None,
+            rotate: vec![],
             version: 1,
         }
     }

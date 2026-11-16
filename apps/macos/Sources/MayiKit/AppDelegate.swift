@@ -64,6 +64,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var deviceName: String { Host.current().localizedName ?? "Mac" }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        installMainMenu()
         let paths = MayiPaths.fromEnvironment()
         let keys: SecureEnclaveKeys
         do {
@@ -105,6 +106,39 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notices in self?.showNotices(isEmpty: notices.isEmpty) }
             .store(in: &subscriptions)
+        // Asked once as Mayi starts (at login too), rather than for each value
+        // shown or device added; it then stays unlocked until the Mac locks.
+        Task { await model.unlock() }
+    }
+
+    /// A menu-bar app has no main menu of its own, and without one the
+    /// usual shortcuts (Command-V, C, X, A, Z, W, Q) do nothing in its
+    /// windows and text fields. It shows while a window is open.
+    private func installMainMenu() {
+        let main = NSMenu()
+        let app = NSMenu()
+        app.addItem(withTitle: "Hide Mayi", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        app.addItem(.separator())
+        app.addItem(withTitle: "Quit Mayi", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z").keyEquivalentModifierMask = [
+            .command, .shift,
+        ]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let window = NSMenu(title: "Window")
+        window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        for menu in [app, edit, window] {
+            let item = NSMenuItem()
+            item.submenu = menu
+            main.addItem(item)
+        }
+        NSApp.mainMenu = main
     }
 
     private func fail(_ error: Error) {
@@ -232,6 +266,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             "Its keys were lost or replaced. Enter your recovery key to restore access, or quit and sync from another device."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 420, height: 24))
         field.placeholderString = "mayi-recovery1.…"
+        // One line that scrolls, as long keys are pasted rather than typed.
+        field.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
+        field.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         alert.accessoryView = field
         alert.addButton(withTitle: "Restore")
         alert.addButton(withTitle: "Quit")
@@ -240,7 +279,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             let keys = try SecureEnclaveKeys.loadOrCreate(directory: paths.keys)
             try recoverVault(
                 vaultPath: paths.vault.path, deviceName: Host.current().localizedName ?? "Mac", keys: keys,
-                recoveryKey: field.stringValue)
+                recoveryKey: field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
             return true
         } catch {
             let failed = NSAlert()

@@ -53,6 +53,17 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import dev.mayi.ffi.RequestInfo
+import android.text.format.DateUtils
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.PhoneAndroid
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.TextButton
+import dev.mayi.ffi.RotateNoteRecord
+import java.text.DateFormat
+import java.util.Date
 
 // A stock Material 3 app: the system's type, shapes and components, with one
 // colour scheme built from the logo's blue. See docs/design-language.md.
@@ -248,8 +259,80 @@ fun shareText(context: Context, text: String) {
     context.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 }
 
-fun origin(request: RequestInfo) =
-    if (request.remote) "From another machine, ${request.requester}" else "From this phone"
+/** "build-vm (3f9a1c2e)" as the name and the key id. */
+fun requesterParts(label: String): Pair<String, String?> {
+    val open = label.lastIndexOf(" (")
+    if (!label.endsWith(")") || open < 0) return label to null
+    return label.substring(0, open) to label.substring(open + 2, label.length - 1)
+}
+
+/**
+ * Where a request comes from: a paired machine stands out in amber with its
+ * name and key id, so a request from an unexpected machine is noticed.
+ */
+@Composable
+fun RequesterChip(request: RequestInfo, compact: Boolean = false) {
+    val (name, key) = if (request.remote) requesterParts(request.requester) else "this phone" to null
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+            .background(if (request.remote) oneCopyColor.copy(alpha = 0.18f) else scheme.surfaceContainerHighest, CircleShape)
+            .padding(horizontal = if (compact) 8.dp else 10.dp, vertical = if (compact) 2.dp else 4.dp)
+            .clearAndSetSemantics { contentDescription = "From $name" + (key?.let { ", key $it" } ?: "") },
+    ) {
+        Icon(
+            if (request.remote) Icons.Outlined.Dns else Icons.Outlined.PhoneAndroid, contentDescription = null,
+            tint = scheme.onSurface, modifier = Modifier.size(if (compact) 14.dp else 16.dp),
+        )
+        Text(
+            "From $name", style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.titleSmall,
+            color = scheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+        )
+        if (key != null && !compact) {
+            Text(key, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = scheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** "today", "yesterday" or "on 3 Nov 2026", for a sentence. */
+private fun noteWhen(atMs: Long): String = when {
+    DateUtils.isToday(atMs) -> "today"
+    DateUtils.isToday(atMs + DateUtils.DAY_IN_MILLIS) -> "yesterday"
+    else -> "on " + DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(atMs))
+}
+
+/** "Mac mini, revoked today" for each note. */
+fun rotationSummary(notes: List<RotateNoteRecord>): String =
+    notes.joinToString("; ") { "${it.who}, ${it.why} ${noteWhen(it.atMs.toLong())}" }
+
+/** What to do about a secret that may be known to a revoked machine or a removed device. */
+fun rotationAdvice(notes: List<RotateNoteRecord>): String {
+    val events = notes.map { "${it.who} was ${it.why} ${noteWhen(it.atMs.toLong())}" }
+    val all = if (events.size == 1) events[0] + ", and may still have this value."
+    else events.joinToString(". ") + ". They may still have this value."
+    return "$all Replace it where it was issued, for example with a new token from the service, then save the " +
+        "new value here: that clears this note."
+}
+
+/** Amber warning: a secret whose value may be known to a revoked machine or removed device. */
+@Composable
+fun RotationCard(notes: List<RotateNoteRecord>, onDismiss: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = oneCopyColor.copy(alpha = 0.14f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Filled.Warning, contentDescription = null, tint = oneCopyColor, modifier = Modifier.size(20.dp))
+                Text("Replace this value", style = MaterialTheme.typography.titleSmall)
+            }
+            Text(rotationAdvice(notes), style = MaterialTheme.typography.bodyMedium)
+            TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("Dismiss") }
+        }
+    }
+}
 
 /** The host of an origin such as `https://github.com`, with its port if it has one, for a sentence. */
 fun host(site: String): String = site.substringAfter("://").substringBefore('/').ifEmpty { site }

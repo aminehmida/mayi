@@ -177,12 +177,16 @@ class MayiController(
     /** Creates or replaces a secret. Returns an error message on failure. */
     fun saveSecret(
         name: String, level: UByte, values: Map<String, String>, allow: List<String>, maxGrantSecs: ULong,
-        login: Boolean = false, sites: List<String> = emptyList(),
-    ): String? = attempt { it.putSecret(name, level, values, allow, maxGrantSecs, login, sites) }
+        login: Boolean = false, sites: List<String> = emptyList(), folder: String? = null,
+    ): String? = attempt { it.putSecret(name, level, values, allow, maxGrantSecs, login, sites, folder) }
 
-    /** Changes a secret's expected commands, websites and grant cap, keeping its values. */
-    fun updateRules(name: String, allow: List<String>, maxGrantSecs: ULong, sites: List<String>): String? =
-        attempt { it.updateRules(name, allow, maxGrantSecs, sites) }
+    /** Changes a secret's expected commands, websites, grant cap and folder, keeping its values. */
+    fun updateRules(
+        name: String, allow: List<String>, maxGrantSecs: ULong, sites: List<String>, folder: String? = null,
+    ): String? = attempt { it.updateRules(name, allow, maxGrantSecs, sites, folder) }
+
+    /** Drops the note that a secret should be replaced, once the owner checked it needs no replacing. */
+    fun dismissRotation(name: String): String? = attempt { it.dismissRotation(name) }
 
     fun deleteSecret(name: String): String? = attempt { it.removeSecret(name) }
 

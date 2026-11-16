@@ -36,9 +36,8 @@ public struct ApprovalView: View {
                     Text(title)
                         .font(.system(size: 15, weight: .semibold))
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(origin(prompt.request))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    RequesterBadge(request: prompt.request)
+                        .padding(.top, 4)
                 }
             }
 
@@ -174,9 +173,14 @@ public struct NoticeView: View {
                     .font(.system(size: 11.5, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                Text(status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if active.ended || active.stopped {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    RequesterBadge(request: active.notice.request, compact: true)
+                        .padding(.top, 2)
+                }
             }
             Spacer(minLength: 8)
             if active.ended || active.stopped {
@@ -213,5 +217,40 @@ public struct NoticeStack: View {
             }
         }
         .padding(8)
+    }
+}
+
+/// Who is asking, large enough to notice: this Mac, or the other machine by
+/// name, with its key's short id. Another machine is tinted, as a request
+/// from elsewhere deserves a second look.
+struct RequesterBadge: View {
+    let request: RequestInfo
+    var compact = false
+
+    /// "build-vm (3f9a1c2e)" as the name and the id.
+    private var parts: (name: String, key: String?) {
+        let label = request.requester
+        guard request.remote, label.hasSuffix(")"), let open = label.range(of: " (", options: .backwards) else {
+            return (request.remote ? label : "This Mac", nil)
+        }
+        return (String(label[..<open.lowerBound]), String(label[open.upperBound...].dropLast()))
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: request.remote ? "server.rack" : "laptopcomputer")
+            Text(request.remote ? "From \(parts.name)" : "From this Mac")
+                .font(.system(size: compact ? 12 : 13.5, weight: .semibold))
+                .lineLimit(1)
+            if let key = parts.key, !compact {
+                Text(key).font(.caption.monospaced()).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, compact ? 7 : 9)
+        .padding(.vertical, compact ? 2 : 4)
+        .background(
+            (request.remote ? Color.orange.opacity(0.16) : Color.secondary.opacity(0.12)),
+            in: Capsule())
+        .accessibilityElement(children: .combine)
     }
 }

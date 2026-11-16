@@ -100,6 +100,7 @@ fn setup() -> Setup {
         max_grant_secs: 600,
         kind: Kind::Secret,
         sites: vec![],
+        folder: None,
     };
     mac_vault.put(secret).unwrap();
     let (_, mac_public) = mac_vault.noise_keypair().unwrap();
@@ -282,40 +283,6 @@ fn a_machine_with_a_vault_device_also_asks_the_others() {
     let config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(setup.dir.path().join("requester.json")).unwrap()).unwrap();
     assert_eq!(config["devices"].as_array().unwrap().len(), 2);
-}
-
-/// An MCP client that sent a progress token hears what mayi is waiting for.
-#[test]
-fn mcp_calls_report_progress_while_waiting() {
-    use std::io::{BufRead, BufReader, Write};
-    let setup = setup();
-    setup.only_phone();
-    let mut server = Command::new(env!("CARGO_BIN_EXE_mayi"))
-        .arg("mcp")
-        .env("MAYI_CONFIG", setup.dir.path().join("requester.json"))
-        .env("MAYI_HOME", setup.dir.path())
-        .env_remove("MAYI_SOCKET")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut input = server.stdin.take().unwrap();
-    let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-        "name": "run_with_secrets", "_meta": {"progressToken": "t1"},
-        "arguments": {"command": ["true"], "secrets": ["TOKEN"], "reason": "a test", "wait_seconds": 5},
-    }});
-    writeln!(input, "{call}").unwrap();
-    let mut lines = BufReader::new(server.stdout.take().unwrap()).lines();
-    let first: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
-    assert_eq!(first["method"], "notifications/progress");
-    assert_eq!(first["params"]["progressToken"], "t1");
-    assert!(first["params"]["message"].as_str().unwrap().starts_with("waiting for your devices"), "{first}");
-    let result: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
-    assert_eq!(result["id"], 1);
-    assert_eq!(result["result"]["isError"], true);
-    assert!(result["result"]["content"][0]["text"].as_str().unwrap().contains("none of your devices could be reached"));
-    drop(input);
-    server.wait().unwrap();
 }
 
 /// A device that drops a request on its own (a phone whose wait was cut

@@ -39,6 +39,8 @@ private const val CHANNEL_SERVICE = "service"
 private const val CHANNEL_REQUESTS = "requests"
 private const val NOTE_SERVICE = 1
 private const val NOTE_ATTENTION = 2
+/** An intent extra: open on the Requests tab. */
+const val EXTRA_OPEN_REQUESTS = "dev.mayi.android.OPEN_REQUESTS"
 
 /** Port paired machines and other devices connect to. */
 private const val PORT: UShort = 7462u
@@ -328,12 +330,17 @@ class MayiApp : Application() {
     private fun openAppIntent(): PendingIntent = PendingIntent.getActivity(
         this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
 
+    /** Opens the app on its Requests tab, where the waiting request is. */
+    private fun openRequestsIntent(): PendingIntent = PendingIntent.getActivity(
+        this, 1, Intent(this, MainActivity::class.java).putExtra(EXTRA_OPEN_REQUESTS, true),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+
     private fun alert(text: String) {
         val notification = Notification.Builder(this, CHANNEL_REQUESTS)
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setContentTitle("Mayi")
             .setContentText(text)
-            .setContentIntent(openAppIntent())
+            .setContentIntent(openRequestsIntent())
             .setAutoCancel(true)
             .build()
         getSystemService(NotificationManager::class.java).notify(NOTE_ATTENTION, notification)

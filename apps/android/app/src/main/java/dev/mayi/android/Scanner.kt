@@ -86,7 +86,8 @@ fun QrScanner(owner: LifecycleOwner, onCode: (String) -> Unit, onCancel: () -> U
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
-                val view = PreviewView(context)
+                // A TextureView: a SurfaceView inside Compose can show no picture.
+                val view = PreviewView(context).apply { implementationMode = PreviewView.ImplementationMode.COMPATIBLE }
                 val providerFuture = ProcessCameraProvider.getInstance(context)
                 providerFuture.addListener({
                     val provider = providerFuture.get()

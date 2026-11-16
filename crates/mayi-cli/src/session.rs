@@ -107,15 +107,21 @@ fn clock(unix_secs: u64) -> String {
 /// The session to report when the agent gives none: readable in a prompt,
 /// for example "claude (pid 43271, since 09:14:02)".
 pub fn default_session() -> String {
-    match agent_process() {
+    // In a terminal, the process above the shell can be one this user may
+    // not read (macOS's `login` runs as root): the shell is then the session.
+    match agent_process().or_else(|| info(parent_id())) {
         Some(p) => format!("{} (pid {}, since {})", base(&p.name), p.pid, clock(p.started)),
         None => format!("ppid:{}", parent_id()),
     }
 }
 
-/// A name for the agent when it gives none: the session's process.
+/// A name for the agent when it gives none: the session's process, or
+/// "terminal" for a person typing at one.
 pub fn default_agent() -> Option<String> {
-    agent_process().map(|p| base(&p.name).to_string())
+    use std::io::IsTerminal;
+    agent_process()
+        .map(|p| base(&p.name).to_string())
+        .or_else(|| std::io::stdin().is_terminal().then(|| "terminal".to_string()))
 }
 
 #[cfg(test)]

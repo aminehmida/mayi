@@ -290,6 +290,19 @@ pub struct SecretRecord {
     /// How many devices hold its current version, as far as this one knows.
     /// With 1, it is lost if this device is.
     pub copies: u32,
+    /// The folder it is kept in, if any.
+    pub folder: Option<String>,
+    /// Who may still know the value: replace it at its source, or dismiss.
+    pub rotate: Vec<RotateNoteRecord>,
+}
+
+/// A machine revoked or a device removed that may still know a secret.
+#[derive(Clone, uniffi::Record)]
+pub struct RotateNoteRecord {
+    pub who: String,
+    /// `revoked` (a machine) or `removed` (a device).
+    pub why: String,
+    pub at_ms: u64,
 }
 
 /// One field of a secret, decrypted to show its owner.
@@ -339,6 +352,12 @@ impl From<ItemMeta> for SecretRecord {
             sites: m.sites,
             // Only on this device until the next sync.
             copies: 1,
+            folder: m.folder,
+            rotate: m
+                .rotate
+                .into_iter()
+                .map(|n| RotateNoteRecord { who: n.who, why: n.why, at_ms: n.at_ms })
+                .collect(),
         }
     }
 }
@@ -368,6 +387,8 @@ pub struct AuditRecord {
     pub site: String,
     pub reason: String,
     pub secrets: Vec<AuditSecret>,
+    /// The device that decided, when another device of the vault did.
+    pub device: Option<String>,
 }
 
 /// A machine paired to send requests over the network.
@@ -714,25 +735,32 @@ impl VaultDevice {
         max_grant_secs: u64,
         login: bool,
         sites: Vec<String>,
+        folder: Option<String>,
     ) -> Result<SecretRecord, MayiError> {
         let level = Level::try_from(level).map_err(|detail| MayiError::Failed { detail })?;
         let values = values.into_iter().map(|(k, v)| (k, Zeroizing::new(v))).collect();
         let kind = if login { Kind::Login } else { Kind::Secret };
         Ok(self
             .vault()
-            .put(NewItem { name, level, values, allow, max_grant_secs, kind, sites })?
+            .put(NewItem { name, level, values, allow, max_grant_secs, kind, sites, folder })?
             .into())
     }
 
-    /// Changes a secret's allowlist, grant cap and websites, keeping its values.
+    /// The owner decided a secret flagged for rotation needs none.
+    pub fn dismiss_rotation(&self, name: String) -> Result<SecretRecord, MayiError> {
+        Ok(self.vault().dismiss_rotation(&name)?.into())
+    }
+
+    /// Changes a secret's allowlist, grant cap, websites and folder, keeping its values.
     pub fn update_rules(
         &self,
         name: String,
         allow: Vec<String>,
         max_grant_secs: u64,
         sites: Vec<String>,
+        folder: Option<String>,
     ) -> Result<SecretRecord, MayiError> {
-        Ok(self.vault().update_rules(&name, allow, max_grant_secs, sites)?.into())
+        Ok(self.vault().update_rules(&name, allow, max_grant_secs, sites, folder)?.into())
     }
 
     pub fn remove_secret(&self, name: String) -> Result<(), MayiError> {
@@ -741,11 +769,14 @@ impl VaultDevice {
 
     /// The last `count` audit entries, oldest first.
     pub fn audit_tail(&self, count: u32) -> Result<Vec<AuditRecord>, MayiError> {
+        let devices = self.vault().devices()?;
+        let device_name = |id: &str| devices.iter().find(|d| d.id == id).map_or_else(|| id.to_string(), |d| d.name.clone());
         Ok(self
             .vault()
             .audit_tail(count as usize)?
             .into_iter()
             .map(|e| AuditRecord {
+                device: (!e.device.is_empty()).then(|| device_name(&e.device)),
                 ts_ms: e.ts_ms,
                 run_id: e.run_id,
                 event: e.event,

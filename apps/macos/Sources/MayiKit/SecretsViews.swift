@@ -12,6 +12,11 @@ public struct SecretEditor: View {
     /// Load the values when the editor opens, hidden behind their eyes: set
     /// when that asks nothing (Mayi is unlocked, the level is below 4).
     let loadsAtOnce: Bool
+    /// The folders in use, offered in the folder field.
+    let folders: [String]
+    /// Drops the note that this secret should be rotated; returns an error.
+    let onDismissRotation: (() -> String?)?
+    @State private var rotationDismissed = false
     let onSave: (SecretDraft.Change) -> String?
     let onCancel: () -> Void
     @State var draft: SecretDraft
@@ -21,13 +26,15 @@ public struct SecretEditor: View {
     public init(
         existing: SecretRecord?, draft: SecretDraft? = nil, error: String? = nil,
         onReveal: (() async -> Result<RevealedSecret, DraftError>)? = nil, revealOnOpen: Bool = false,
-        loadsAtOnce: Bool = false,
+        loadsAtOnce: Bool = false, folders: [String] = [], onDismissRotation: (() -> String?)? = nil,
         onSave: @escaping (SecretDraft.Change) -> String?, onCancel: @escaping () -> Void
     ) {
         self.existing = existing
         self.onReveal = onReveal
         self.revealOnOpen = revealOnOpen
         self.loadsAtOnce = loadsAtOnce
+        self.folders = folders
+        self.onDismissRotation = onDismissRotation
         self.onSave = onSave
         self.onCancel = onCancel
         _draft = State(initialValue: draft ?? existing.map(SecretDraft.init(editing:)) ?? SecretDraft())
@@ -35,6 +42,7 @@ public struct SecretEditor: View {
     }
 
     private var shown: Bool { draft.shown != nil }
+    private static let rotationSection = "rotation"
 
     /// Loads the stored values into the draft. Returns whether it did.
     @discardableResult
@@ -73,37 +81,85 @@ public struct SecretEditor: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            Form {
-                Section {
-                    Picker("Type", selection: $draft.login) {
-                        Label("Secret", systemImage: "key").tag(false)
-                        Label("Website Login", systemImage: "globe").tag(true)
-                    }
-                    .disabled(existing != nil)
-                    TextField("Name", text: $draft.name, prompt: Text(draft.login ? "github" : "GITHUB_TOKEN"))
-                        .font(.system(.body, design: .monospaced))
-                        .disabled(existing != nil)
-                    Picker("Level", selection: $draft.level) {
-                        ForEach(UInt8(1)...4, id: \.self) { level in
-                            Label(LevelInfo.name(level), systemImage: LevelInfo.symbol(level)).tag(level)
+            ScrollViewReader { proxy in
+                Form {
+                    Section {
+                        Picker("Type", selection: $draft.login) {
+                            Label("Secret", systemImage: "key").tag(false)
+                            Label("Website Login", systemImage: "globe").tag(true)
                         }
+                        .disabled(existing != nil)
+                        TextField("Name", text: $draft.name, prompt: Text(draft.login ? "github" : "GITHUB_TOKEN"))
+                            .font(.system(.body, design: .monospaced))
+                            .disabled(existing != nil)
+                        Picker("Level", selection: $draft.level) {
+                            ForEach(UInt8(1)...4, id: \.self) { level in
+                                Label(LevelInfo.name(level), systemImage: LevelInfo.symbol(level)).tag(level)
+                            }
+                        }
+                        HStack {
+                            TextField("Folder", text: $draft.folderText, prompt: Text("none"))
+                            Menu {
+                                ForEach(folders, id: \.self) { folder in
+                                    Button(folder) { draft.folderText = folder }
+                                }
+                                if !draft.folderText.isEmpty {
+                                    Divider()
+                                    Button("No Folder") { draft.folderText = "" }
+                                }
+                            } label: {
+                                Image(systemName: "folder")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .disabled(folders.isEmpty && draft.folderText.isEmpty)
+                            .help("Choose a folder in use")
+                        }
+                    } footer: {
+                        Text(
+                            draft.login
+                                ? "\(LevelInfo.detail(draft.level, login: true)) A login is only ever typed into its websites, never given to a command."
+                                : LevelInfo.detail(draft.level)
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                } footer: {
-                    Text(
-                        draft.login
-                            ? "\(LevelInfo.detail(draft.level, login: true)) A login is only ever typed into its websites, never given to a command."
-                            : LevelInfo.detail(draft.level)
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
 
-                if draft.login {
-                    loginSections
-                } else {
-                    secretSections
+                    if draft.login {
+                        loginSections
+                    } else {
+                        secretSections
+                    }
+                    if let existing, !existing.rotate.isEmpty, !rotationDismissed {
+                        Section {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label("Replace this value", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.headline)
+                                    .symbolRenderingMode(.multicolor)
+                                Text(rotationAdvice(existing.rotate))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                HStack {
+                                    Spacer()
+                                    Button("Dismiss") {
+                                        if let problem = onDismissRotation?() {
+                                            error = problem
+                                        } else {
+                                            rotationDismissed = true
+                                        }
+                                    }
+                                    .help("You checked, and this value needs no replacing")
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .id(Self.rotationSection)
+                    }
+                }
+                .formStyle(.grouped)
+                .onAppear {
+                    // The note sits at the bottom; bring it into view.
+                    if existing?.rotate.isEmpty == false { proxy.scrollTo(Self.rotationSection, anchor: .bottom) }
                 }
             }
-            .formStyle(.grouped)
 
             Divider()
             HStack(spacing: 10) {
@@ -273,6 +329,8 @@ public struct SecretEditor: View {
 
 struct SecretRow: View {
     let secret: SecretRecord
+    /// Opens the secret, from its rotation warning.
+    var onOpen: () -> Void = {}
 
     /// What the secret holds and which commands it is meant for, as a sentence.
     private var summary: String {
@@ -298,6 +356,15 @@ struct SecretRow: View {
                 .accessibilityLabel(secret.login ? "Website login" : "Secret")
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
+                    if !secret.rotate.isEmpty {
+                        Button(action: onOpen) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .symbolRenderingMode(.multicolor)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("May be known to \(rotationSummary(secret.rotate)). Open it to see what to do.")
+                        .accessibilityLabel("Needs replacing")
+                    }
                     Text(secret.name).font(.system(.body, design: .monospaced))
                     if secret.copies < 2 {
                         OneCopyDot()
@@ -401,6 +468,36 @@ struct PeekField: View {
     }
 }
 
+private let noteDate: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .none
+    return formatter
+}()
+
+/// "today", "yesterday" or "on 3 Nov 2026", for a sentence.
+private func noteWhen(_ atMs: UInt64) -> String {
+    let date = Date(timeIntervalSince1970: Double(atMs) / 1000)
+    if Calendar.current.isDateInToday(date) { return "today" }
+    if Calendar.current.isDateInYesterday(date) { return "yesterday" }
+    return "on " + noteDate.string(from: date)
+}
+
+/// "Mac mini (test), revoked today" for each note.
+func rotationSummary(_ notes: [RotateNoteRecord]) -> String {
+    notes.map { "\($0.who), \($0.why) \(noteWhen($0.atMs))" }.joined(separator: "; ")
+}
+
+/// What to do about a secret that may be known to a revoked machine or a removed device.
+func rotationAdvice(_ notes: [RotateNoteRecord]) -> String {
+    let events = notes.map { "\($0.who) was \($0.why) \(noteWhen($0.atMs))" }
+    let all = events.count == 1
+        ? events[0] + ", and may still have this value."
+        : events.joined(separator: ". ") + ". They may still have this value."
+    return "\(all) Replace it where it was issued, for example with a new token from the service, then save the "
+        + "new value here: that clears this note."
+}
+
 /// Marks a secret that exists only on this Mac, so it is lost if the Mac is.
 struct OneCopyDot: View {
     var body: some View {
@@ -438,6 +535,9 @@ struct CopyButton: View {
 
 public struct SecretsView: View {
     @ObservedObject var model: AppModel
+    /// Only the secrets in this folder, when set.
+    let folder: String?
+    @State private var query = ""
     @State private var selection: String?
     @State private var editor: EditorTarget?
     @State private var confirmDelete: String?
@@ -470,20 +570,33 @@ public struct SecretsView: View {
         }
     }
 
-    public init(model: AppModel) {
+    public init(model: AppModel, folder: String? = nil) {
         self.model = model
+        self.folder = folder
     }
 
     private func secret(_ name: String?) -> SecretRecord? {
         model.secrets.first { $0.name == name }
     }
 
+    /// The secrets in view: this folder's, matching the search by name,
+    /// folder, website or field.
+    private var shown: [SecretRecord] {
+        let words = query.lowercased().split(separator: " ").map(String.init)
+        return model.secrets.filter { secret in
+            guard folder == nil || secret.folder == folder else { return false }
+            let text = ([secret.name, secret.folder ?? ""] + secret.sites + secret.fields).joined(separator: " ").lowercased()
+            return words.allSatisfy { text.contains($0) }
+        }
+    }
+
     public var body: some View {
         List(selection: $selection) {
-            ForEach(model.secrets, id: \.name) { secret in
-                SecretRow(secret: secret).tag(secret.name)
+            ForEach(shown, id: \.name) { secret in
+                SecretRow(secret: secret, onOpen: { editor = .edit(secret) }).tag(secret.name)
             }
         }
+        .searchable(text: $query, prompt: "Search secrets")
         .listStyle(.inset)
         .contextMenu(forSelectionType: String.self) { names in
             if let secret = secret(names.first) {
@@ -503,10 +616,16 @@ public struct SecretsView: View {
                 } actions: {
                     Button("Add Secret") { editor = .new }
                 }
+            } else if shown.isEmpty, !query.isEmpty {
+                ContentUnavailableView.search(text: query)
+            } else if shown.isEmpty, let folder {
+                ContentUnavailableView(
+                    "\(folder) is empty", systemImage: "folder",
+                    description: Text("Move a secret here by choosing this folder when you edit it."))
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(message: error, isError: true) }
-        .navigationTitle("Secrets")
+        .navigationTitle(folder ?? "Secrets")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -541,9 +660,12 @@ public struct SecretsView: View {
         .sheet(item: $editor) { target in
             SecretEditor(
                 existing: target.existing,
+                draft: target.existing == nil ? newDraft : nil,
                 onReveal: target.existing.map { secret in { await model.revealSecret(secret) } },
                 revealOnOpen: target.revealsAtOnce,
                 loadsAtOnce: target.existing.map { model.unlocked && $0.level < 4 } ?? false,
+                folders: model.folders,
+                onDismissRotation: target.existing.map { secret in { model.dismissRotation(name: secret.name) } },
                 onSave: { change in
                     let problem = apply(change)
                     if problem == nil { editor = nil }
@@ -565,14 +687,21 @@ public struct SecretsView: View {
         }
     }
 
+    /// A new secret starts in the folder being looked at.
+    private var newDraft: SecretDraft {
+        var draft = SecretDraft()
+        draft.folderText = folder ?? ""
+        return draft
+    }
+
     private func apply(_ change: SecretDraft.Change) -> String? {
         switch change {
-        case .put(let name, let level, let values, let allow, let maxGrantSecs, let login, let sites):
+        case .put(let name, let level, let values, let allow, let maxGrantSecs, let login, let sites, let folder):
             return model.saveSecret(
                 name: name, level: level, values: values, allow: allow, maxGrantSecs: maxGrantSecs, login: login,
-                sites: sites)
-        case .rules(let name, let allow, let maxGrantSecs, let sites):
-            return model.updateRules(name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites)
+                sites: sites, folder: folder)
+        case .rules(let name, let allow, let maxGrantSecs, let sites, let folder):
+            return model.updateRules(name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites, folder: folder)
         }
     }
 }
@@ -591,10 +720,11 @@ public struct ActivityView: View {
         var entries: [AuditRecord]
     }
 
-    /// Newest first, split where the calendar day changes.
+    /// Newest first, split where the calendar day changes. Another device's
+    /// withdrawn prompts are left out: the request shows where it was answered.
     private var days: [Day] {
         var days: [Day] = []
-        for entry in model.log.reversed() {
+        for entry in model.log.reversed() where !(entry.device != nil && entry.outcome == "withdrawn") {
             let day = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: Double(entry.tsMs) / 1000))
             if days.last?.id == day {
                 days[days.count - 1].entries.append(entry)
@@ -663,6 +793,17 @@ struct ActivityRow: View {
 
     private var names: String { entry.secrets.map(\.name).joined(separator: ", ") }
 
+    /// The agent, the machine it asked from, and which device answered when
+    /// it was another one.
+    private var whoAndWhere: String {
+        switch (entry.remote, entry.device) {
+        case (true, nil): return "\(entry.agent), from \(entry.requester)"
+        case (true, let device?): return "\(entry.agent), from \(entry.requester), answered on \(device)"
+        case (false, nil): return "\(entry.agent), on this Mac"
+        case (false, let device?): return "\(entry.agent), on \(device)"
+        }
+    }
+
     private var signIn: Bool { !entry.site.isEmpty }
 
     private var title: String {
@@ -680,7 +821,7 @@ struct ActivityRow: View {
         case "stop":
             return signIn ? "Sign-in stopped by you" : "Command stopped by you"
         case "view":
-            return "You viewed \(names) on this Mac"
+            return "You viewed \(names) on \(entry.device ?? "this Mac")"
         default:
             // A sign-in's "command" is the typing; its exit says whether that worked.
             if signIn {
@@ -735,7 +876,7 @@ struct ActivityRow: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
-                    Text("\(entry.agent), \(entry.remote ? "from \(entry.requester)" : "on this Mac")")
+                    Text(whoAndWhere)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
@@ -753,7 +894,21 @@ struct ActivityRow: View {
 
 public struct MainView: View {
     @ObservedObject var model: AppModel
-    @State private var section: Section?
+    @State private var place: Place?
+
+    /// A sidebar row: a section, or a folder of secrets under Secrets.
+    private enum Place: Hashable {
+        case section(Section)
+        case folder(String)
+    }
+
+    private var section: Section? {
+        switch place {
+        case .section(let section): return section
+        case .folder: return .secrets
+        case nil: return nil
+        }
+    }
     /// Told which section is showing, so the window can take its name.
     private let onSection: (Section) -> Void
 
@@ -778,7 +933,7 @@ public struct MainView: View {
     public init(model: AppModel, section: Section = .secrets, onSection: @escaping (Section) -> Void = { _ in }) {
         self.model = model
         self.onSection = onSection
-        _section = State(initialValue: section)
+        _place = State(initialValue: .section(section))
     }
 
     private func count(_ section: Section) -> Int {
@@ -792,19 +947,30 @@ public struct MainView: View {
 
     public var body: some View {
         NavigationSplitView {
-            List(Section.allCases, selection: $section) { item in
-                Label(item.rawValue, systemImage: item.symbol)
-                    .badge(count(item))
-                    .tag(item)
+            List(selection: $place) {
+                ForEach(Section.allCases) { item in
+                    Label(item.rawValue, systemImage: item.symbol)
+                        .badge(count(item))
+                        .tag(Place.section(item))
+                    if item == .secrets {
+                        ForEach(model.folders, id: \.self) { folder in
+                            Label(folder, systemImage: "folder")
+                                .badge(model.secrets.filter { $0.folder == folder }.count)
+                                .padding(.leading, 14)
+                                .tag(Place.folder(folder))
+                        }
+                    }
+                }
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 240)
         } detail: {
-            switch section ?? .secrets {
-            case .secrets: SecretsView(model: model)
-            case .machines: MachinesView(model: model)
-            case .devices: DevicesView(model: model)
-            case .activity: ActivityView(model: model)
+            switch place ?? .section(.secrets) {
+            case .folder(let folder): SecretsView(model: model, folder: folder).id(folder)
+            case .section(.secrets): SecretsView(model: model)
+            case .section(.machines): MachinesView(model: model)
+            case .section(.devices): DevicesView(model: model)
+            case .section(.activity): ActivityView(model: model)
             }
         }
         .frame(minWidth: 720, minHeight: 440)
@@ -812,6 +978,6 @@ public struct MainView: View {
             model.refresh()
             onSection(section ?? .secrets)
         }
-        .onChange(of: section) { _, new in onSection(new ?? .secrets) }
+        .onChange(of: place) { _, _ in onSection(section ?? .secrets) }
     }
 }
