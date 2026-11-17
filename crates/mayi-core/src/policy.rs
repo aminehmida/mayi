@@ -1,5 +1,10 @@
 //! Decides what a request needs before a secret is released.
 
+use std::path::Path;
+
+use mayi_proto::program;
+use mayi_proto::RunRequest;
+
 use crate::model::{ItemMeta, Level};
 
 pub struct Rules {
@@ -22,7 +27,12 @@ impl Default for Rules {
 }
 
 pub struct Ctx<'a> {
+    /// The command as shown: its program by full path when the requester
+    /// sent one.
     pub command: &'a str,
+    /// The same command with its program by name (`gh pr list`), when that
+    /// name may match an expected command: see [`command_by_name`].
+    pub by_name: Option<&'a str>,
     pub remote: bool,
 }
 
@@ -58,6 +68,18 @@ pub fn command_line(argv: &[String]) -> String {
     argv.iter().map(quote).collect::<Vec<_>>().join(" ")
 }
 
+/// The command with its program by name, for expected commands written as
+/// `gh *`. Only when the requester looked the name up itself, outside the
+/// working folder and temporary folders, and found it outside temporary
+/// folders: a program given by path (`./gh`), or one an agent could have
+/// dropped there under a familiar name, matches only a pattern with its path.
+pub fn command_by_name(request: &RunRequest) -> Option<String> {
+    let program = request.program.as_deref()?;
+    let name = request.argv.first()?;
+    (!name.is_empty() && !name.contains('/') && !program::temporary(Path::new(program)))
+        .then(|| command_line(&request.argv))
+}
+
 /// Matches `text` against a pattern where `*` stands for any run of characters.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let (p, t) = (pattern.as_bytes(), text.as_bytes());
@@ -81,8 +103,8 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     p[pi..].iter().all(|&c| c == b'*')
 }
 
-fn allowlisted(meta: &ItemMeta, command: &str) -> bool {
-    meta.allow.iter().any(|p| glob_match(p, command))
+fn allowlisted(meta: &ItemMeta, ctx: &Ctx) -> bool {
+    meta.allow.iter().any(|p| glob_match(p, ctx.command) || ctx.by_name.is_some_and(|c| glob_match(p, c)))
 }
 
 /// The secret's level after context is applied. Never below its own level.
@@ -92,7 +114,7 @@ pub fn effective_level(meta: &ItemMeta, ctx: &Ctx, rules: &Rules) -> Level {
         level = level.max(rules.remote_min.min(Level::Approve));
     }
     // A secret with an allowlist used by some other command is suspicious.
-    if !meta.allow.is_empty() && !allowlisted(meta, ctx.command) {
+    if !meta.allow.is_empty() && !allowlisted(meta, ctx) {
         level = level.max(Level::Approve);
     }
     level
@@ -104,7 +126,7 @@ pub fn decide(meta: &ItemMeta, ctx: &Ctx, rules: &Rules, has_grant: bool) -> (Le
         Level::Log => Verdict::Release { notify: false, via: Via::Level },
         Level::Notify => Verdict::Release { notify: true, via: Via::Level },
         Level::Approve if has_grant => Verdict::Release { notify: false, via: Via::Grant },
-        Level::Approve if allowlisted(meta, ctx.command) => {
+        Level::Approve if allowlisted(meta, ctx) => {
             Verdict::Release { notify: true, via: Via::Allowlist }
         }
         Level::Approve => Verdict::Prompt,
@@ -189,14 +211,47 @@ mod tests {
         for (i, (level, allow, command, remote, grant, want_level, want)) in
             cases.into_iter().enumerate()
         {
-            let got = decide(&meta(level, allow), &Ctx { command, remote }, &rules, grant);
+            let got = decide(&meta(level, allow), &Ctx { command, by_name: None, remote }, &rules, grant);
             assert_eq!(got, (want_level, want), "case {i}");
         }
     }
 
     #[test]
+    fn a_name_matches_only_a_program_looked_up_outside_reach() {
+        let request = |argv: &[&str], program: Option<&str>| RunRequest {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            program: program.map(String::from),
+            cwd: "/work".into(),
+            ..Default::default()
+        };
+        let gh = meta(Level::Approve, &["gh *"]);
+        let verdict = |r: &RunRequest| {
+            let command = command_line(&r.shown_argv());
+            let by_name = command_by_name(r);
+            decide(&gh, &Ctx { command: &command, by_name: by_name.as_deref(), remote: false }, &Rules::default(), false).1
+        };
+        let allowed = Verdict::Release { notify: true, via: Via::Allowlist };
+        // Looked up by the requester in an ordinary folder: shown by path, matched by name.
+        let found = request(&["gh", "pr", "list"], Some("/opt/homebrew/bin/gh"));
+        assert_eq!(command_line(&found.shown_argv()), "/opt/homebrew/bin/gh pr list");
+        assert_eq!(verdict(&found), allowed);
+        // Given by path, or found in a temporary folder: asked about.
+        assert_eq!(verdict(&request(&["./gh", "pr"], Some("/work/gh"))), Verdict::Prompt);
+        assert_eq!(verdict(&request(&["gh", "pr"], Some("/private/tmp/x/gh"))), Verdict::Prompt);
+        // A pattern with the path matches the path.
+        let pinned = meta(Level::Approve, &["/work/gh *"]);
+        let r = request(&["./gh", "pr"], Some("/work/gh"));
+        let command = command_line(&r.shown_argv());
+        let by_name = command_by_name(&r);
+        let ctx = Ctx { command: &command, by_name: by_name.as_deref(), remote: false };
+        assert_eq!(decide(&pinned, &ctx, &Rules::default(), false).1, allowed);
+        // A requester from before alpha.9 sends no path: matched as before.
+        assert_eq!(verdict(&request(&["gh", "pr"], None)), allowed);
+    }
+
+    #[test]
     fn rules_never_lower_and_never_reach_biometric() {
-        let ctx = Ctx { command: "x", remote: true };
+        let ctx = Ctx { command: "x", by_name: None, remote: true };
         let strict = Rules { remote_min: Level::Biometric, ..Rules::default() };
         assert_eq!(effective_level(&meta(Level::Log, &[]), &ctx, &strict), Level::Approve);
         let lax = Rules { remote_min: Level::Log, ..Rules::default() };

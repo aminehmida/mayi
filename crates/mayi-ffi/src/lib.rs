@@ -180,7 +180,7 @@ struct UiAdapter(Arc<dyn UiDelegate>);
 
 fn request_info(request: &RunRequest, requester: &Requester) -> RequestInfo {
     RequestInfo {
-        command: command_line(&request.argv),
+        command: command_line(&request.shown_argv()),
         site: request.site.clone(),
         fields: if request.site.is_some() {
             request.bindings.iter().map(|b| b.field.clone()).collect()
@@ -261,6 +261,15 @@ impl Ui for UiAdapter {
 pub enum MayiError {
     #[error("{detail}")]
     Failed { detail: String },
+}
+
+/// Writing to a connection the other side closed (a `mayi` that went away
+/// before its answer, a phone that dropped off) must fail the write, not end
+/// the app: a Rust program ignores SIGPIPE, an app hosting this library does
+/// not.
+fn no_sigpipe() {
+    // SAFETY: sets the disposition of one signal; no handler runs.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
 }
 
 impl From<mayi_core::Error> for MayiError {
@@ -437,6 +446,7 @@ pub fn join_vault(
     keys: Arc<dyn KeyStore>,
     token: String,
 ) -> Result<(), MayiError> {
+    no_sigpipe();
     let keys: Arc<dyn HardwareKeys> = Arc::new(KeyAdapter(keys));
     mayi_core::server::join_vault(Path::new(&vault_path), keys, &device_name, &token)?;
     Ok(())
@@ -473,6 +483,7 @@ impl JoinInvitation {
     /// this one; empty means this device's own network addresses.
     #[uniffi::constructor]
     pub fn open(addresses: Vec<String>, ttl_secs: u64) -> Result<Arc<Self>, MayiError> {
+        no_sigpipe();
         Ok(Arc::new(Self { code: JoinCode::open(addresses, 0, ttl_secs)?, cancelled: AtomicBool::new(false) }))
     }
 
@@ -517,6 +528,7 @@ impl VaultDevice {
         keys: Arc<dyn KeyStore>,
         ui: Arc<dyn UiDelegate>,
     ) -> Result<Arc<Self>, MayiError> {
+        no_sigpipe();
         let path = Path::new(&vault_path);
         let keys: Arc<dyn HardwareKeys> = Arc::new(KeyAdapter(keys));
         let vault = if path.exists() {

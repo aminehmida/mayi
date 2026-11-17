@@ -72,7 +72,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 throw MayiError.Failed(detail: "This Mac has no Secure Enclave, so it cannot be a vault device.")
             }
             let fresh = !FileManager.default.fileExists(atPath: paths.vault.path)
-            keys = try SecureEnclaveKeys.loadOrCreate(directory: paths.keys, freshVault: fresh)
+            do {
+                keys = try SecureEnclaveKeys.loadOrCreate(directory: paths.keys, freshVault: fresh)
+            } catch KeyWrapError.missingKey where !fresh {
+                // The keys cannot be opened without their keychain item. Set
+                // them aside and make new ones: the vault then fails to open
+                // and the recovery key is asked for, as when keys are lost.
+                let aside = paths.keys.deletingLastPathComponent()
+                    .appendingPathComponent("keys.lost-\(Int(Date().timeIntervalSince1970))")
+                try FileManager.default.moveItem(at: paths.keys, to: aside)
+                keys = try SecureEnclaveKeys.loadOrCreate(directory: paths.keys)
+            }
         } catch {
             fail(error)
             return

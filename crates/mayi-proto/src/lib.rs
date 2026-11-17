@@ -4,6 +4,7 @@
 //! travel over the local unix socket and inside a Noise tunnel (see [`noise`]).
 
 pub mod noise;
+pub mod program;
 pub mod site;
 
 use std::collections::BTreeMap;
@@ -50,6 +51,22 @@ pub struct RunRequest {
     /// binding's `env` is the key its value comes back under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
+    /// The absolute path the requester runs `argv[0]` from, which it looked
+    /// up itself (see [`program`]). Shown in its place, so the owner sees
+    /// which program will run. Absent from requesters before alpha.9.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+}
+
+impl RunRequest {
+    /// The command as it will run: `argv` with the program's full path.
+    pub fn shown_argv(&self) -> Vec<String> {
+        let mut argv = self.argv.clone();
+        if let (Some(first), Some(program)) = (argv.first_mut(), &self.program) {
+            first.clone_from(program);
+        }
+        argv
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

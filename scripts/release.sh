@@ -34,6 +34,10 @@ pack() {
 
 # Mac app (builds the CLI for this Mac as well).
 apps/macos/build.sh
+# Without the hardened runtime, another program could load its code into
+# Mayi and read the keychain item that protects its keys.
+codesign -dv apps/macos/build/Mayi.app 2>&1 | grep -q "flags=.*runtime" ||
+    { echo "Mayi.app is not signed with the hardened runtime" >&2; exit 1; }
 # Without extended attributes: as AppleDouble files they would break the
 # app's seal when extracted with unzip.
 ditto -c -k --norsrc --noextattr --keepParent apps/macos/build/Mayi.app "$dist/Mayi-$version-macos-arm64.zip"

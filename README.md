@@ -7,6 +7,14 @@ entering the model's context. Website logins work the same way: Mayi types
 them into the sign-in page open in the agent's browser, two-factor code
 included.
 
+Mayi complements an agent sandbox; it does not replace one. It decides which
+secrets an agent may use, asks you as you choose, records every use, and
+keeps values out of the model's context. An agent that has been compromised
+and runs as you can still keep a value you let it use; a sandbox with a
+network policy (Docker's agent sandboxes, OpenShell) is what stops it going
+anywhere. Use both for agents you cannot fully trust, and keep the secrets
+that matter most at level 4, where each use needs your fingerprint.
+
 Status: all five milestones of the [design](docs/design.md) are built, and
 website logins after them. What
 it protects and where it stops is in the [threat model](docs/threat-model.md);
@@ -82,6 +90,12 @@ Levels 1 to 3 are rules the vault device follows; they stop a misbehaving
 agent, not malware on the vault device. Only level 4 is enforced by
 encryption.
 
+Approving a request gives the secret to that agent session; it does not
+control what the session does with it. Prompts and Activity show the full
+path of the program that will run (`/opt/homebrew/bin/gh pr list`): `mayi`
+looks it up itself, not in the working folder or temporary folders, and
+runs it without the variables that make programs load other code.
+
 ## Mac app
 
 Rust is managed with mise (`mise install`). The app builds with the Xcode
@@ -130,6 +144,11 @@ sidebar on the Mac and as filters above the list on the phone.
 Activity is shared: each device sends what it recorded to the others when
 they sync, so any of them shows every request, which machine made it, and
 which device answered. Entries are kept for 90 days.
+
+The app's own keys are sealed with an item in your keychain that only Mayi
+can read. Until Mayi is signed with an Apple Developer ID, macOS asks once
+after each update whether Mayi may use it: type your password and choose
+Always Allow.
 
 Mayi lives in the menu bar, and in the Dock while one of its windows is
 open. Opening it from Finder or Spotlight shows its window, which helps when

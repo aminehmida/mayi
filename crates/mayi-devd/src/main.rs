@@ -294,7 +294,7 @@ fn describe(request: &RunRequest, requester: &Requester) -> String {
             let fields: Vec<&str> = request.bindings.iter().map(|b| b.field.as_str()).collect();
             format!("sign in: {site}  (types {})", fields.join(", "))
         }
-        None => format!("command : {}", command_line(&request.argv)),
+        None => format!("command : {}", command_line(&request.shown_argv())),
     };
     format!(
         "  {target}\n  cwd     : {}\n  machine : {} ({})\n  claims  : agent {:?}, session {:?}, host {:?}\n  reason  : {:?}  (written by the agent)\n",

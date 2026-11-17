@@ -305,6 +305,28 @@ editor scrolled to its warning. Still to do by hand:
       prompt taken down because the other device answered does not appear
       twice.
 
+## The program's full path and sealed keys (v0.1.0-alpha.9)
+
+Automated tests cover a program named like an expected one in a temporary
+folder first in PATH (not looked up, nothing asked), the same program given
+by path (asked, shown by its full path), an expected command matched by name
+for an ordinary program, the command's PATH and variables cleaned, and key
+blobs sealed with a keychain key and refused without it. Checked on this Mac:
+another program could use a Secure Enclave key blob before; a keychain item
+made by one program is refused to another; code loaded into a program reads
+its items unless the program uses the hardened runtime. Still to do by hand:
+
+- [ ] After installing alpha.9, macOS asks once whether Mayi may use its
+      keychain item: allow it with your password. The vault opens, level 4
+      works, and `~/Library/Application Support/Mayi/keys` holds only
+      `.sealed` files.
+- [ ] The next update asks once again, and nothing else changes.
+- [ ] Requests from Claude Code on the MacBook show the program's full path
+      in the panel and in Activity, and secrets with expected commands
+      (`gh *`) still skip the prompt.
+- [ ] A tool only in the project (`node_modules/.bin`) fails with "give its
+      path", and works when given as `./node_modules/.bin/…`.
+
 ## Decisions waiting for you
 
 - [x] The repository `aminehmida/mayi` is public.

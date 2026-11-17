@@ -54,7 +54,7 @@ import Testing
         try await eventually { !model.notices.isEmpty }
         let notice = model.notices[0]
         #expect(notice.notice.secrets == ["L2"])
-        #expect(notice.notice.request.command.hasPrefix("sh -c "))
+        #expect(notice.notice.request.command.hasPrefix("/bin/sh -c "))
         model.stop(runId: notice.id)
         #expect(model.notices[0].stopped)
         let finished = try await result
@@ -71,7 +71,8 @@ import Testing
         try await eventually { model.pending.count == 1 }
         let prompt = model.pending[0].prompt
         #expect(prompt.secrets.map(\.name) == ["L3"] && prompt.secrets[0].needsApproval)
-        #expect(prompt.request.command == "sh -c 'echo $L3'")
+        // The program by the full path mayi found it at.
+        #expect(prompt.request.command == "/bin/sh -c 'echo $L3'")
         #expect(prompt.request.reason == "end to end test" && !prompt.request.remote)
         model.answer(model.pending[0].id, .deny)
         let deniedResult = try await denied
@@ -101,7 +102,7 @@ import Testing
         keys.allowBiometric = true
         let allowed = try await run("L4", "echo \"${#L4} $L4\"")
         #expect(allowed.out == "15 [masked]\n")
-        #expect(keys.prompts.last == "Unlock L4 for `sh -c 'echo \"${#L4} $L4\"'` on local")
+        #expect(keys.prompts.last == "Unlock L4 for `/bin/sh -c 'echo \"${#L4} $L4\"'` on local")
         #expect(model.pending.isEmpty, "the biometric check is the approval")
 
         // Within the window the same command needs no second check.

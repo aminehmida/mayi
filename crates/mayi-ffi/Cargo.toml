@@ -21,3 +21,4 @@ mayi-proto.workspace = true
 uniffi = "0.32"
 thiserror = "2"
 zeroize = "1"
+libc = "0.2"

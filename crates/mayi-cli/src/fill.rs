@@ -302,6 +302,7 @@ pub fn fill(args: FillArgs) -> Result<u8, Failure> {
         session: session_id,
         host: crate::hostname(),
         site: Some(origin.to_string()),
+        program: None,
     };
     let reach::Answer { reply, replies, mut writer } =
         reach::ask(&request, args.remote, args.patience.wait, args.patience.timeout)?;

@@ -121,5 +121,6 @@ line only when something changes, such as
 | 69 | None of the user's devices could be reached in time (default 1 hour; `--wait SECONDS`), or this machine is not paired. The message says when each device was last reached. | Tell the user; they may need to open Mayi on their phone, connect Tailscale, or run `mayi pair`. |
 | 65 | `mayi fill` could not fill the page: no sign-in field, another website, a refused form, or the page changed. | Read the message; fix the page or the selector, or ask the user. |
 | 64 | Bad arguments, or `mayi fill` given a secret that is not a login. | Fix the command. |
+| 127 | The program was not found. `mayi` does not look programs up in the working folder or temporary folders, so a tool there (`node_modules/.bin`) needs its path. | Give the path (`./node_modules/.bin/eslint`); the user sees it in the prompt. |
 
 Any other code is the command's own.

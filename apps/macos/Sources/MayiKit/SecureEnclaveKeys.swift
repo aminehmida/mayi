@@ -6,7 +6,9 @@ import Security
 /// The device's two keys, generated inside the Secure Enclave.
 ///
 /// The private keys never leave the enclave. What is stored on disk are
-/// opaque blobs that only this Mac's enclave can use. The device key works
+/// opaque blobs that only this Mac's enclave can use, sealed with a key in
+/// the keychain that only Mayi can read (see `KeyWrap`): the enclave itself
+/// would let any program of the user use a blob. The device key works
 /// whenever the Mac has been unlocked once. The level 4 key needs the owner
 /// for every use: Touch ID, an Apple Watch, or the login password when
 /// Touch ID cannot be used (a closed lid, no Touch ID keyboard).
@@ -28,23 +30,25 @@ public final class SecureEnclaveKeys: KeyStore, @unchecked Sendable {
     /// `freshVault` says no vault depends on the keys yet, so an older
     /// fingerprint-only level 4 key can give way to one that also accepts
     /// the password.
-    public static func loadOrCreate(directory: URL, freshVault: Bool = false) throws -> SecureEnclaveKeys {
+    public static func loadOrCreate(
+        directory: URL, freshVault: Bool = false, wrap: KeyWrap = KeyWrap()
+    ) throws -> SecureEnclaveKeys {
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        let deviceBlob = try blob(at: directory.appendingPathComponent("device.sekey")) {
+        let deviceBlob = try wrap.load(directory.appendingPathComponent("device.sekey")) {
             try SecureEnclave.P256.KeyAgreement.PrivateKey(
                 accessControl: accessControl(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, [.privateKeyUsage])
             ).dataRepresentation
         }
         let older = directory.appendingPathComponent("biometric.sekey")
         let current = directory.appendingPathComponent("presence.sekey")
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: current.path), fm.fileExists(atPath: older.path), !freshVault {
+        if !wrap.exists(current), wrap.exists(older), !freshVault {
             return try SecureEnclaveKeys(
-                deviceBlob: deviceBlob, biometricBlob: try Data(contentsOf: older), acceptsPassword: false)
+                deviceBlob: deviceBlob, biometricBlob: try wrap.load(older) { throw KeyWrapError.damaged },
+                acceptsPassword: false)
         }
-        let presenceBlob = try blob(at: current) {
+        let presenceBlob = try wrap.load(current) {
             try SecureEnclave.P256.KeyAgreement.PrivateKey(
                 accessControl: accessControl(kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .userPresence])
             ).dataRepresentation
@@ -70,16 +74,6 @@ public final class SecureEnclaveKeys: KeyStore, @unchecked Sendable {
             throw error!.takeRetainedValue() as Error
         }
         return control
-    }
-
-    private static func blob(at url: URL, create: () throws -> Data) throws -> Data {
-        if let existing = try? Data(contentsOf: url) {
-            return existing
-        }
-        let data = try create()
-        try data.write(to: url, options: .withoutOverwriting)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        return data
     }
 
     public func devicePublic() -> Data {

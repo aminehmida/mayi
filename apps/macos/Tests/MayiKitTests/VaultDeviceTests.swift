@@ -60,9 +60,11 @@ import Testing
         let dir = try scratch()
         let keyDir = dir.appendingPathComponent("keys")
         let path = dir.appendingPathComponent("vault.db").path
+        // An in-memory sealing key: tests leave the login keychain alone.
+        let wrap = KeyWrap(store: MemoryWrapKey())
         let first: SecureEnclaveKeys
         do {
-            first = try SecureEnclaveKeys.loadOrCreate(directory: keyDir)
+            first = try SecureEnclaveKeys.loadOrCreate(directory: keyDir, wrap: wrap)
         } catch let error as NSError where error.code == Int(errSecInteractionNotAllowed) {
             // The Secure Enclave makes no keys while the Mac is locked.
             return
@@ -75,16 +77,22 @@ import Testing
                 name: "PROD", level: 4, values: ["value": "xyz"], allow: [], maxGrantSecs: 60, login: false, sites: [], folder: nil)
         }
 
-        let second = try SecureEnclaveKeys.loadOrCreate(directory: keyDir)
+        let second = try SecureEnclaveKeys.loadOrCreate(directory: keyDir, wrap: wrap)
         #expect(second.devicePublic() == first.devicePublic())
         #expect(second.biometricPublic() == first.biometricPublic())
         let reopened = try VaultDevice.open(vaultPath: path, deviceName: "mac", keys: second, ui: SilentUi())
         #expect(try reopened.listSecrets().map(\.name) == ["PROD"])
 
         let mode = try FileManager.default.attributesOfItem(
-            atPath: keyDir.appendingPathComponent("presence.sekey").path)[.posixPermissions] as? Int
+            atPath: keyDir.appendingPathComponent("presence.sekey.sealed").path)[.posixPermissions] as? Int
         #expect(mode == 0o600)
+        #expect(!FileManager.default.fileExists(atPath: keyDir.appendingPathComponent("device.sekey").path))
         #expect(first.acceptsPassword)
+
+        // Another program has the files but not the keychain item.
+        #expect(throws: KeyWrapError.self) {
+            try SecureEnclaveKeys.loadOrCreate(directory: keyDir, wrap: KeyWrap(store: MemoryWrapKey()))
+        }
     }
 
     /// A Mac set up by an earlier version keeps its fingerprint-only level 4
@@ -105,16 +113,43 @@ import Testing
         }
         try older.dataRepresentation.write(to: keyDir.appendingPathComponent("biometric.sekey"))
 
-        let kept = try SecureEnclaveKeys.loadOrCreate(directory: keyDir)
+        let wrap = KeyWrap(store: MemoryWrapKey())
+        let kept = try SecureEnclaveKeys.loadOrCreate(directory: keyDir, wrap: wrap)
         #expect(!kept.acceptsPassword)
         #expect(kept.biometricPublic() == older.publicKey.x963Representation)
 
-        let fresh = try SecureEnclaveKeys.loadOrCreate(directory: keyDir, freshVault: true)
+        let fresh = try SecureEnclaveKeys.loadOrCreate(directory: keyDir, freshVault: true, wrap: wrap)
         #expect(fresh.acceptsPassword)
         #expect(fresh.biometricPublic() != older.publicKey.x963Representation)
         #expect(fresh.devicePublic() == kept.devicePublic(), "the device key, and so the device's identity, stays")
-        let after = try SecureEnclaveKeys.loadOrCreate(directory: keyDir)
+        let after = try SecureEnclaveKeys.loadOrCreate(directory: keyDir, wrap: wrap)
         #expect(after.biometricPublic() == fresh.biometricPublic(), "the new key is used from then on")
+    }
+
+    /// Blobs from an earlier version are sealed on first load and the plain
+    /// files deleted; a sealed blob opens only with its own key and under
+    /// its own name.
+    @Test func keyBlobsAreSealedWithTheKeychainKey() throws {
+        let dir = try scratch()
+        let plain = dir.appendingPathComponent("device.sekey")
+        try Data("enclave blob".utf8).write(to: plain)
+        let store = MemoryWrapKey()
+        let wrap = KeyWrap(store: store)
+        #expect(try wrap.load(plain) { Data() } == Data("enclave blob".utf8))
+        #expect(!FileManager.default.fileExists(atPath: plain.path))
+        let sealed = dir.appendingPathComponent("device.sekey.sealed")
+        #expect(try Data(contentsOf: sealed) != Data("enclave blob".utf8))
+        #expect(try wrap.load(plain) { Data("not used".utf8) } == Data("enclave blob".utf8))
+
+        // Moved under another key's name, it does not open.
+        let other = dir.appendingPathComponent("presence.sekey")
+        try FileManager.default.copyItem(at: sealed, to: dir.appendingPathComponent("presence.sekey.sealed"))
+        #expect(throws: KeyWrapError.self) { try wrap.load(other) { Data() } }
+
+        // Without the keychain item, the keys cannot be opened, and none is made up.
+        store.forget()
+        #expect(throws: KeyWrapError.self) { try wrap.load(plain) { Data() } }
+        #expect(try store.sealingKey(create: false) == nil)
     }
 }
 

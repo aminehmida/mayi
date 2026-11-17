@@ -842,6 +842,7 @@ dependencies = [
 name = "mayi-ffi"
 version = "0.1.0-alpha.8"
 dependencies = [
+ "libc",
  "mayi-core",
  "mayi-proto",
  "thiserror",

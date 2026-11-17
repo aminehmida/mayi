@@ -49,6 +49,10 @@ cp Info.plist "$app/Contents/Info.plist"
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -1)
 /usr/libexec/PlistBuddy -c "Add :MayiVersion string $version" "$app/Contents/Info.plist"
 cp Mayi.icns "$app/Contents/Resources/Mayi.icns"
-# Ad-hoc signature: enough to run locally, not to distribute.
-codesign --force --sign - "$app"
+# Ad-hoc signature: enough to run locally, not to distribute. The hardened
+# runtime keeps other programs from loading their code into Mayi (with
+# DYLD_INSERT_LIBRARIES), which would let them read its keychain item.
+codesign --force --options runtime --sign - "$app/Contents/Resources/mayi"
+codesign --force --options runtime --sign - "$app"
+codesign --verify --strict "$app"
 echo "Built $app"

@@ -32,11 +32,14 @@ struct Owner {
     active: AtomicBool,
     gone: Mutex<HashSet<u64>>,
     last_run: AtomicU64,
+    /// The commands asked about, as shown.
+    commands: Mutex<Vec<String>>,
 }
 
 impl Ui for Owner {
     fn approve(&self, prompt: &Prompt) -> Approval {
         self.last_run.store(prompt.run_id, Ordering::SeqCst);
+        self.commands.lock().unwrap().push(mayi_core::policy::command_line(&prompt.request.shown_argv()));
         self.asked.fetch_add(1, Ordering::SeqCst);
         loop {
             if self.gone.lock().unwrap().contains(&prompt.run_id) {
@@ -89,6 +92,11 @@ struct Setup {
 }
 
 fn setup() -> Setup {
+    setup_with(&[])
+}
+
+/// As [`setup`], with TOKEN expected with these commands.
+fn setup_with(allow: &[&str]) -> Setup {
     let dir = tempfile::tempdir().unwrap();
     let mac_vault =
         Vault::create(&dir.path().join("mac.db"), Arc::new(SoftwareKeys::generate(|_| true)), "mac").unwrap();
@@ -96,7 +104,7 @@ fn setup() -> Setup {
         name: "TOKEN".into(),
         level: Level::Approve,
         values: [("value".to_string(), Zeroizing::new("s3cret".to_string()))].into_iter().collect(),
-        allow: vec![],
+        allow: allow.iter().map(|s| s.to_string()).collect(),
         max_grant_secs: 600,
         kind: Kind::Secret,
         sites: vec![],
@@ -141,9 +149,14 @@ impl Setup {
     }
 
     fn run(&self, env: &[(&str, &str)]) -> Child {
+        self.run_command(&["sh", "-c", "test \"$TOKEN\" = s3cret && printf released"], env)
+    }
+
+    fn run_command(&self, argv: &[&str], env: &[(&str, &str)]) -> Child {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mayi"));
         command
-            .args(["run", "-s", "TOKEN", "-r", "a test", "--session", "s", "--", "sh", "-c", "test \"$TOKEN\" = s3cret && printf released"])
+            .args(["run", "-s", "TOKEN", "-r", "a test", "--session", "s", "--"])
+            .args(argv)
             .env("MAYI_CONFIG", self.dir.path().join("requester.json"))
             // No vault device on this machine.
             .env("MAYI_HOME", self.dir.path())
@@ -300,4 +313,44 @@ fn a_device_that_drops_the_request_is_asked_again() {
     let (code, out, err) = finish(child);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out, "released");
+}
+
+#[test]
+fn a_program_runs_from_where_mayi_found_it_and_is_shown_so() {
+    use std::os::unix::fs::PermissionsExt;
+    let setup = setup_with(&["mayi-test-tool *", "sh *"]);
+    let mac = &setup.mac;
+    // The agent's own program, named like an expected one, first in PATH.
+    let bin = setup.dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let tool = bin.join("mayi-test-tool");
+    std::fs::write(&tool, "#!/bin/sh\nprintf 'ran %s' \"$TOKEN\"\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+
+    // By name, it is not looked up in a temporary folder, and nothing is asked.
+    let (code, _, err) = finish(setup.run_command(&["mayi-test-tool", "x"], &[("PATH", &path)]));
+    assert_eq!(code, Some(127), "{err}");
+    assert!(err.contains("give its path"), "{err}");
+    assert_eq!(mac.owner.asked.load(Ordering::SeqCst), 0);
+
+    // By path it runs, but the expected command written by name does not
+    // cover it: the owner is asked, and sees where it is.
+    mac.owner.answer.store(ALLOW, Ordering::SeqCst);
+    let (code, out, err) = finish(setup.run_command(&[tool.to_str().unwrap(), "x"], &[("PATH", &path)]));
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "ran [masked]");
+    assert_eq!(mac.owner.asked.load(Ordering::SeqCst), 1);
+    let shown = mac.owner.commands.lock().unwrap()[0].clone();
+    assert_eq!(shown, format!("{} x", tool.display()));
+
+    // An ordinary program matches by name, without its variables that load
+    // other code, and with PATH left without the agent's folder.
+    let (code, out, err) = finish(setup.run_command(
+        &["sh", "-c", "printf '%s|%s' \"${BASH_ENV-unset}\" \"$PATH\""],
+        &[("PATH", &path), ("BASH_ENV", "/nowhere")],
+    ));
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "unset|/usr/bin:/bin");
+    assert_eq!(mac.owner.asked.load(Ordering::SeqCst), 1, "matched by name, not asked");
 }

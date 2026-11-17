@@ -201,7 +201,8 @@ impl Broker {
             session: request.session.clone(),
             host: request.host.clone(),
             cwd: request.cwd.clone(),
-            argv: request.argv.clone(),
+            // What ran: the program by its full path when the requester sent it.
+            argv: request.shown_argv(),
             site: request.site.clone().unwrap_or_default(),
             reason: request.reason.clone(),
             ..Default::default()
@@ -265,9 +266,10 @@ impl Broker {
         // What grants are keyed on and allowlists matched against.
         let command = match &site {
             Some(origin) => format!("sign in to {origin}"),
-            None => policy::command_line(&request.argv),
+            None => policy::command_line(&request.shown_argv()),
         };
-        let ctx = Ctx { command: &command, remote: requester.remote };
+        let by_name = site.is_none().then(|| policy::command_by_name(request)).flatten();
+        let ctx = Ctx { command: &command, by_name: by_name.as_deref(), remote: requester.remote };
         let now = now_ms();
 
         let mut plans: Vec<Plan> = Vec::new();
@@ -491,7 +493,7 @@ fn biometric_prompt(site: Option<&Origin>, request: &RunRequest, requester: &Req
         None => format!(
             "Unlock {} for `{}` on {}",
             names.join(", "),
-            policy::command_line(&request.argv),
+            policy::command_line(&request.shown_argv()),
             requester.id
         ),
     }

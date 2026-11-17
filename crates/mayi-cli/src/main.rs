@@ -7,6 +7,7 @@ mod cdp;
 mod config;
 mod fill;
 mod mask;
+mod program;
 mod reach;
 mod session;
 
@@ -247,15 +248,26 @@ fn run(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (EXIT_USAGE, e))?;
     let (agent, session) = requester_identity(agent, session);
+    // Looked up here, outside the working folder and temporary folders, and
+    // run from exactly this path, which the owner is shown.
+    let cwd = std::env::current_dir().map_err(|e| (EXIT_USAGE, format!("cannot read the working folder: {e}")))?;
+    let path = program::path_var();
+    let dirs = program::search_dirs(path.as_deref(), &cwd);
+    let program_path = program::locate(&command[0], &cwd, &dirs, path.as_deref()).map_err(|e| (127, e))?;
+    let program_shown = program_path
+        .to_str()
+        .ok_or_else(|| (127, format!("cannot run {}: its path is not valid UTF-8", program_path.display())))?
+        .to_string();
     let request = RunRequest {
         bindings,
         argv: command.clone(),
-        cwd: std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+        cwd: cwd.display().to_string(),
         reason,
         agent,
         session,
         host: hostname(),
         site: None,
+        program: Some(program_shown),
     };
 
     let reach::Answer { reply, replies, mut writer } =
@@ -266,9 +278,13 @@ fn run(
         _ => return Err((EXIT_UNAVAILABLE, "unexpected reply from the vault device".into())),
     };
 
-    let mut child_cmd = Command::new(&command[0]);
+    let mut child_cmd = Command::new(&program_path);
+    child_cmd.arg0(&command[0]).args(&command[1..]);
+    for (key, _) in std::env::vars_os().filter(|(key, _)| program::dropped(key)) {
+        child_cmd.env_remove(key);
+    }
     child_cmd
-        .args(&command[1..])
+        .env("PATH", program::search_path(&dirs))
         .envs(&env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

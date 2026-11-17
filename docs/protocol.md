@@ -12,7 +12,7 @@ Requester to device:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `run` | `bindings`, `argv`, `cwd`, `reason`, `agent`, `session`, `host`, optional `site` | Ask to run `argv` with secrets, or with `site`, to type a login into a page. Each binding is `{env, item, field}`. |
+| `run` | `bindings`, `argv`, `cwd`, `reason`, `agent`, `session`, `host`, optional `site` and `program` | Ask to run `argv` with secrets, or with `site`, to type a login into a page. Each binding is `{env, item, field}`. |
 | `list` | | Ask for secret names, levels and field names. |
 | `done` | `exit` | The command of a released run ended. |
 | `pair` | `name` | Enrol this machine. Only valid in a pairing tunnel. |
@@ -37,8 +37,18 @@ then sends `done`. A requester that closes the connection before a decision
 withdraws its request, and any prompt for it is taken down.
 
 `cwd`, `reason`, `agent`, `session` and `host` are whatever the requester
-says. A device shows them as claims. What a device knows for certain is the
-command (`argv`) and which transport and key the request arrived on.
+says. A device shows them as claims. What a device knows for certain is
+which transport and key the request arrived on. The command (`argv`) is what
+the requester says it will run; the real `mayi` runs exactly that, but a
+device cannot check that the requester is the real `mayi`.
+
+`program` is the absolute path the requester found `argv[0]` at, looking it
+up without the working folder and temporary folders. Devices show the
+command with it in place of `argv[0]`, record it so in Activity, and key
+grants on that form. An expected command written by name (`gh *`) matches
+the command with `argv[0]` as given, only when `argv[0]` is a bare name and
+`program` is outside temporary folders. Without `program` (requesters before
+alpha.9) the command is matched as given.
 
 ### Sign-ins
 

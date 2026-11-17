@@ -109,7 +109,8 @@ class ControllerTest {
         val answerer = Thread {
             eventually("a prompt") { controller.state.pending.size == 1 }
             val prompt = controller.state.pending[0]
-            assertEquals("sh -c 'echo \$L3'", prompt.request.command)
+            // The program as the requester found it, by its full path.
+            assertEquals("/bin/sh -c 'echo \$L3'", prompt.request.command)
             assertTrue(prompt.request.remote)
             controller.answer(prompt.runId, ApprovalChoice.ONCE)
         }.apply { start() }
