@@ -215,6 +215,10 @@ pub fn write_profiles(profiles: &[Profile]) -> io::Result<Written> {
         Err(e) => return Err(e),
     };
     let (text, written, skipped) = render(&existing, profiles);
+    // Nothing to change: leave the file, or its absence, alone.
+    if text == existing || (existing.is_empty() && text.trim().is_empty()) {
+        return Ok(Written { path, written, skipped });
+    }
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
