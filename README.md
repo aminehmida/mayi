@@ -67,16 +67,35 @@ needs Android 12 or later and a phone that can keep keys in secure hardware.
 ### Making a release
 
 ```sh
-# bump the version in Cargo.toml, apps/android/app/build.gradle.kts and apps/macos/Info.plist
+# bump the version in Cargo.toml, apps/android/app/build.gradle.kts and apps/macos/Info.plist,
+# and write docs/releases/vVERSION.md
+git commit -am "Release VERSION" && git push
+git tag vVERSION && git push origin vVERSION
+```
+
+Pushing the tag runs [the release workflow](.github/workflows/release.yml)
+on a macOS runner: it builds every file with `scripts/release.sh`, publishes
+the GitHub release with `scripts/publish.py`, and commits the Homebrew update
+to `main`. Started by hand from the Actions tab, it builds without
+publishing and attaches the files to the run.
+
+By hand instead, on a Mac with the Android SDK:
+
+```sh
 scripts/release.sh                       # builds everything into dist/VERSION
 git tag vVERSION && git push origin vVERSION
 scripts/publish.py                       # GitHub release, then rewrites Formula/ and Casks/
 git commit -am "Point Homebrew at VERSION" && git push
 ```
 
-The Android signing key is `~/.android/mayi-release.jks`, with its password
-in the keychain item `mayi-android-release`. Keep a copy of both somewhere
-safe: a release signed with another key cannot update installed copies.
+The Android signing key is `~/.android/mayi-release.jks`. `release.sh` reads
+its password from `MAYI_KEYSTORE_PASSWORD`, or else the keychain item
+`mayi-android-release`; with Mayi, `mayi run -s
+MAYI_KEYSTORE_PASSWORD=mayi-android-release-password -r "…" --
+scripts/release.sh`. The workflow has both as the repository secrets
+`MAYI_KEYSTORE_BASE64` and `MAYI_KEYSTORE_PASSWORD`. Keep a copy of the key
+and its password somewhere safe: a release signed with another key cannot
+update installed copies.
 
 ## Levels
 
