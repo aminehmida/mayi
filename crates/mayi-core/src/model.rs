@@ -37,15 +37,76 @@ impl TryFrom<u8> for Level {
     }
 }
 
-/// Where a secret's values may go.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Kind {
+/// Where a secret's values may go. Stored as `kind`, with the names it had
+/// before destinations had their own word: `secret` and `login`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum Destination {
     /// Into the environment of a command.
     #[default]
-    Secret,
+    Command,
     /// Into the sign-in form of one of its websites, and nowhere else.
-    Login,
+    Website,
+    /// One added by a newer version of Mayi: listed and synced, never
+    /// released here.
+    Other(String),
+}
+
+impl From<String> for Destination {
+    fn from(name: String) -> Self {
+        match name.as_str() {
+            "secret" => Self::Command,
+            "login" => Self::Website,
+            _ => Self::Other(name),
+        }
+    }
+}
+
+impl From<Destination> for String {
+    fn from(destination: Destination) -> String {
+        match destination {
+            Destination::Command => "secret".into(),
+            Destination::Website => "login".into(),
+            Destination::Other(name) => name,
+        }
+    }
+}
+
+/// What produces a secret's values (see `provider.rs`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum Source {
+    /// The values saved by the owner. Left out of stored records, so they
+    /// read the same to versions that came before sources.
+    #[default]
+    Stored,
+    /// One added by a newer version of Mayi: listed and synced, never
+    /// released here.
+    Other(String),
+}
+
+impl Source {
+    pub fn is_stored(&self) -> bool {
+        *self == Source::Stored
+    }
+}
+
+impl From<String> for Source {
+    fn from(name: String) -> Self {
+        match name.as_str() {
+            "stored" => Self::Stored,
+            _ => Self::Other(name),
+        }
+    }
+}
+
+impl From<Source> for String {
+    fn from(source: Source) -> String {
+        match source {
+            Source::Stored => "stored".into(),
+            Source::Other(name) => name,
+        }
+    }
 }
 
 /// Field name to value.
@@ -64,8 +125,10 @@ pub struct ItemMeta {
     /// Longest a single approval may stay valid. 0 means every use asks again.
     pub max_grant_secs: u64,
     pub fields: Vec<String>,
-    #[serde(default)]
-    pub kind: Kind,
+    #[serde(default, rename = "kind")]
+    pub destination: Destination,
+    #[serde(default, skip_serializing_if = "Source::is_stored")]
+    pub source: Source,
     /// The websites a login may be typed into: a host, `*.` and a host for
     /// its subdomains, each with an optional port. Empty for other secrets.
     #[serde(default)]
@@ -77,6 +140,10 @@ pub struct ItemMeta {
     /// removed. Cleared by saving a new value, or dismissed by the owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rotate: Vec<RotateNote>,
+    /// Fields written by a newer version of Mayi, kept as they are so that
+    /// changing this secret here does not strip them.
+    #[serde(flatten)]
+    pub unknown_fields: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
     pub version: u64,
 }
@@ -97,7 +164,53 @@ pub struct NewItem {
     pub values: SecretValues,
     pub allow: Vec<String>,
     pub max_grant_secs: u64,
-    pub kind: Kind,
+    pub destination: Destination,
     pub sites: Vec<String>,
     pub folder: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(json: serde_json::Value) -> ItemMeta {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn base() -> serde_json::Value {
+        serde_json::json!({
+            "id": "i1", "name": "TOKEN", "level": 3, "allow": [], "max_grant_secs": 600,
+            "fields": ["value"], "kind": "secret", "sites": [],
+        })
+    }
+
+    #[test]
+    fn records_read_and_write_as_before() {
+        let secret = meta(base());
+        assert_eq!(secret.destination, Destination::Command);
+        assert_eq!(secret.source, Source::Stored);
+        assert_eq!(serde_json::to_value(&secret).unwrap(), base(), "no new keys written");
+
+        let mut login = base();
+        login["kind"] = "login".into();
+        assert_eq!(meta(login.clone()).destination, Destination::Website);
+        assert_eq!(serde_json::to_value(meta(login.clone())).unwrap(), login);
+
+        let mut old = base();
+        old.as_object_mut().unwrap().remove("kind");
+        assert_eq!(meta(old).destination, Destination::Command, "records from before logins");
+    }
+
+    #[test]
+    fn what_a_newer_version_wrote_survives_a_round_trip() {
+        let mut newer = base();
+        newer["kind"] = "file".into();
+        newer["source"] = "aws_sso".into();
+        newer["targets"] = serde_json::json!([{ "name": "ReadOnly", "level": 1 }]);
+        let read = meta(newer.clone());
+        assert_eq!(read.destination, Destination::Other("file".into()));
+        assert_eq!(read.source, Source::Other("aws_sso".into()));
+        assert!(read.unknown_fields.contains_key("targets"));
+        assert_eq!(serde_json::to_value(&read).unwrap(), newer);
+    }
 }

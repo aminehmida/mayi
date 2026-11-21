@@ -7,6 +7,7 @@ pub mod grants;
 pub mod hardware;
 pub mod model;
 pub mod policy;
+pub mod provider;
 #[cfg(unix)]
 pub mod server;
 pub mod sync;

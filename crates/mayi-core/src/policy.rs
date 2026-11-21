@@ -149,10 +149,12 @@ mod tests {
             allow: allow.iter().map(|s| s.to_string()).collect(),
             max_grant_secs: 600,
             fields: vec!["value".into()],
-            kind: Default::default(),
+            destination: Default::default(),
+            source: Default::default(),
             sites: vec![],
             folder: None,
             rotate: vec![],
+            unknown_fields: Default::default(),
             version: 1,
         }
     }

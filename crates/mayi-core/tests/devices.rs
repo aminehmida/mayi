@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use mayi_core::broker::{Approval, Broker, Notice, Prompt, Ui};
 use mayi_core::hardware::SoftwareKeys;
-use mayi_core::model::{Kind, Level, NewItem};
+use mayi_core::model::{Destination, Level, NewItem};
 use mayi_core::policy::Rules;
 use mayi_core::server::{join_vault, JoinCode, Server};
 use mayi_core::vault::Vault;
@@ -69,7 +69,7 @@ fn item(name: &str, level: Level) -> NewItem {
         values: [("value".to_string(), Zeroizing::new(format!("{name}-value")))].into_iter().collect(),
         allow: vec![],
         max_grant_secs: 600,
-        kind: Kind::Secret,
+        destination: Destination::Command,
         sites: vec![],
         folder: None,
     }

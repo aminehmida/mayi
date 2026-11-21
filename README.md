@@ -21,7 +21,8 @@ it protects and where it stops is in the [threat model](docs/threat-model.md);
 how the pieces talk is in the [protocol](docs/protocol.md). Nothing has been
 audited, and several things have only been tested with stand-ins for real
 hardware: see [docs/manual-checks.md](docs/manual-checks.md) before trusting
-it with secrets that matter.
+it with secrets that matter. What comes next (AWS SSO, SSH signing, a token
+proxy) is planned in [docs/providers.md](docs/providers.md).
 
 ## Install
 
@@ -310,7 +311,7 @@ target/debug/mayi-devd serve --listen 0.0.0.0:7462   # also accept paired machin
 ## Layout
 
 - `crates/mayi-proto`: messages between requester and vault device
-- `crates/mayi-core`: vault, key hierarchy, policy, grants, audit log, broker
+- `crates/mayi-core`: vault, key hierarchy, policy, grants, audit log, broker, providers
 - `crates/mayi-cli`: `mayi`, the requester, including the browser filler (`fill.rs`, `fill.js`, `cdp.rs`)
 - `crates/mayi-ffi`: the core's API for the apps, through UniFFI
 - `crates/mayi-devd`: development vault device with terminal prompts

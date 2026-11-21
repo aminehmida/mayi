@@ -355,7 +355,7 @@ pub fn sync_as_callee<R: Read, W: Write>(
 mod tests {
     use super::*;
     use crate::hardware::{HardwareKeys, SoftwareKeys};
-    use crate::model::{Kind, Level, NewItem};
+    use crate::model::{Destination, Level, NewItem};
     use crate::vault::NewDevice;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -368,7 +368,7 @@ mod tests {
             values: [("value".to_string(), Zeroizing::new(value.to_string()))].into_iter().collect(),
             allow: vec![],
             max_grant_secs: 600,
-            kind: Kind::Secret,
+            destination: Destination::Command,
             sites: vec![],
             folder: None,
         }
@@ -480,6 +480,27 @@ mod tests {
         p.mac.remove("TOKEN").unwrap();
         sync(&p.mac, &p.phone);
         assert!(p.phone.meta("TOKEN").is_err(), "deletions propagate");
+        assert_eq!(p.mac.digest().unwrap(), p.phone.digest().unwrap());
+    }
+
+    /// Before sources, a destination a device did not know failed the whole
+    /// sync. Now it arrives, keeps what this version does not know, and is
+    /// never opened.
+    #[test]
+    fn a_secret_from_a_newer_version_syncs_without_stopping_the_rest() {
+        let p = pair(&[]);
+        p.mac.put(item("OK", Level::Log, "ok-value")).unwrap();
+        let mut meta = p.mac.put(item("KUBECONFIG", Level::Approve, "x")).unwrap();
+        meta.destination = Destination::Other("file".into());
+        meta.unknown_fields.insert("path".into(), serde_json::json!("~/.kube/config"));
+        p.mac.write_meta(meta).unwrap();
+
+        sync(&p.mac, &p.phone);
+        assert_eq!(value(&p.phone, "OK"), "ok-value");
+        let got = p.phone.meta("KUBECONFIG").unwrap();
+        assert_eq!(got.destination, Destination::Other("file".into()));
+        assert_eq!(got.unknown_fields.get("path"), Some(&serde_json::json!("~/.kube/config")));
+        assert!(p.phone.reveal(&[&got], "p").is_err());
         assert_eq!(p.mac.digest().unwrap(), p.phone.digest().unwrap());
     }
 

@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use mayi_core::broker::{Approval, Broker, Notice, Prompt, Requester, Ui};
 use mayi_core::grants::GrantScope;
 use mayi_core::hardware::SoftwareKeys;
-use mayi_core::model::{Kind, Level, NewItem, SecretValues};
+use mayi_core::model::{Destination, Level, NewItem, SecretValues};
 use mayi_core::policy::{command_line, Rules};
 use mayi_core::server::Server;
 use mayi_core::vault::Vault;
@@ -208,8 +208,8 @@ fn add(args: AddArgs) -> Res<()> {
         }
     }
     let level = Level::try_from(level)?;
-    let kind = if login { Kind::Login } else { Kind::Secret };
-    let meta = vault.put(NewItem { name, level, values, allow, max_grant_secs: max_grant, kind, sites, folder: None })?;
+    let destination = if login { Destination::Website } else { Destination::Command };
+    let meta = vault.put(NewItem { name, level, values, allow, max_grant_secs: max_grant, destination, sites, folder: None })?;
     let sites = if meta.sites.is_empty() { String::new() } else { format!(" for {}", meta.sites.join(", ")) };
     println!("Saved {}{sites} at level {} (version {})", meta.name, meta.level as u8, meta.version);
     Ok(())

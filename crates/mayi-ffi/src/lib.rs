@@ -14,7 +14,7 @@ use mayi_core::broker::{Approval, Broker, Notice, Prompt, Requester, Ui};
 use mayi_core::crypto::Key;
 use mayi_core::grants::GrantScope;
 use mayi_core::hardware::HardwareKeys;
-use mayi_core::model::{ItemMeta, Kind, Level, NewItem};
+use mayi_core::model::{Destination, ItemMeta, Level, NewItem};
 use mayi_core::policy::{command_line, Rules};
 use mayi_core::server::{JoinCode, Server};
 use mayi_core::vault::Vault;
@@ -357,7 +357,7 @@ impl From<ItemMeta> for SecretRecord {
             allow: m.allow,
             max_grant_secs: m.max_grant_secs,
             version: m.version,
-            login: m.kind == Kind::Login,
+            login: m.destination == Destination::Website,
             sites: m.sites,
             // Only on this device until the next sync.
             copies: 1,
@@ -751,10 +751,10 @@ impl VaultDevice {
     ) -> Result<SecretRecord, MayiError> {
         let level = Level::try_from(level).map_err(|detail| MayiError::Failed { detail })?;
         let values = values.into_iter().map(|(k, v)| (k, Zeroizing::new(v))).collect();
-        let kind = if login { Kind::Login } else { Kind::Secret };
+        let destination = if login { Destination::Website } else { Destination::Command };
         Ok(self
             .vault()
-            .put(NewItem { name, level, values, allow, max_grant_secs, kind, sites, folder })?
+            .put(NewItem { name, level, values, allow, max_grant_secs, destination, sites, folder })?
             .into())
     }
 

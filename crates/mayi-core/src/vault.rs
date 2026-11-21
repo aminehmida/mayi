@@ -17,15 +17,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use mayi_proto::site::normalize_site;
-use mayi_proto::{FIELD_PASSWORD, FIELD_TOTP, FIELD_USERNAME};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::crypto::{self, Key};
 use crate::hardware::HardwareKeys;
-use crate::model::{ItemMeta, Kind, Level, NewItem, RotateNote, SecretValues};
-use crate::totp::Totp;
+use crate::model::{Destination, ItemMeta, Level, NewItem, RotateNote, SecretValues, Source};
+use crate::provider::{self, NEEDS_NEWER};
 use crate::{now_ms, Error, Result};
 
 const SCHEMA: &str = "
@@ -247,24 +246,30 @@ fn wrap_aad(item_id: &str) -> Vec<u8> {
     format!("mayi/wrap/{item_id}").into_bytes()
 }
 
-/// Binds the values to the item's level and kind, so a relabelled item
-/// fails to open: a login turned into a plain secret could be put in a
-/// command's environment.
-fn payload_aad(item_id: &str, level: Level, kind: Kind) -> Vec<u8> {
-    match kind {
-        Kind::Secret => format!("mayi/payload/{item_id}/{}", level as u8).into_bytes(),
-        Kind::Login => format!("mayi/payload/{item_id}/{}/login", level as u8).into_bytes(),
+/// Binds the values to the item's level and destination, so a relabelled
+/// item fails to open: a login turned into a plain secret could be put in a
+/// command's environment. A destination or source this version does not
+/// know is never opened.
+fn payload_aad(meta: &ItemMeta) -> Result<Vec<u8>> {
+    let (id, level) = (&meta.id, meta.level as u8);
+    match (&meta.destination, &meta.source) {
+        (Destination::Command, Source::Stored) => Ok(format!("mayi/payload/{id}/{level}").into_bytes()),
+        (Destination::Website, Source::Stored) => Ok(format!("mayi/payload/{id}/{level}/login").into_bytes()),
+        _ => Err(Error::Vault(format!("{}: {NEEDS_NEWER}", meta.name))),
     }
 }
 
-const LOGIN_FIELDS: [&str; 3] = [FIELD_USERNAME, FIELD_PASSWORD, FIELD_TOTP];
-
-/// Normalizes a login's websites; other secrets have none.
-fn check_sites(kind: Kind, sites: &[String]) -> Result<Vec<String>> {
-    match kind {
-        Kind::Secret if sites.is_empty() => Ok(vec![]),
-        Kind::Secret => Err(Error::Vault("only a login has websites".into())),
-        Kind::Login => {
+/// Checks the rules that come with a destination: a login has websites and
+/// no command allowlist, other secrets the reverse. Returns the websites,
+/// normalized.
+fn check_rules(destination: &Destination, allow: &[String], sites: &[String]) -> Result<Vec<String>> {
+    match destination {
+        Destination::Command if sites.is_empty() => Ok(vec![]),
+        Destination::Command => Err(Error::Vault("only a login has websites".into())),
+        Destination::Website if !allow.is_empty() => {
+            Err(Error::Vault("a login is used on websites, not with commands".into()))
+        }
+        Destination::Website => {
             let mut normalized = Vec::new();
             for site in sites {
                 let site = normalize_site(site).map_err(Error::Vault)?;
@@ -277,31 +282,8 @@ fn check_sites(kind: Kind, sites: &[String]) -> Result<Vec<String>> {
             }
             Ok(normalized)
         }
+        Destination::Other(_) => Err(Error::Vault(NEEDS_NEWER.into())),
     }
-}
-
-/// A login holds a password, and optionally a username and a two-factor
-/// key, under fixed names. Empty optional fields are dropped.
-fn check_login(new: &mut NewItem) -> Result<()> {
-    if new.kind == Kind::Secret {
-        return Ok(());
-    }
-    if !new.allow.is_empty() {
-        return Err(Error::Vault("a login is used on websites, not with commands".into()));
-    }
-    if let Some(other) = new.values.keys().find(|f| !LOGIN_FIELDS.contains(&f.as_str())) {
-        return Err(Error::Vault(format!(
-            "a login has a username, a password and a two-factor key, not {other:?}"
-        )));
-    }
-    new.values.retain(|field, value| field == FIELD_PASSWORD || !value.trim().is_empty());
-    if new.values.get(FIELD_PASSWORD).is_none_or(|p| p.is_empty()) {
-        return Err(Error::Vault("a login needs a password".into()));
-    }
-    if let Some(key) = new.values.get(FIELD_TOTP) {
-        Totp::parse(key).map_err(Error::Vault)?;
-    }
-    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -530,8 +512,10 @@ impl Vault {
         if new.values.is_empty() {
             return Err(Error::Vault("a secret needs at least one field".into()));
         }
-        check_login(&mut new)?;
-        let sites = check_sites(new.kind, &new.sites)?;
+        let sites = check_rules(&new.destination, &new.allow, &new.sites)?;
+        provider::find(&new.destination, &Source::Stored)
+            .and_then(|p| p.check(&mut new.values))
+            .map_err(Error::Vault)?;
         let existing = self.list()?.into_iter().find(|m| m.name == new.name);
         let id = existing.as_ref().map(|m| m.id.clone()).unwrap_or_else(crypto::random_id);
         let dk = crypto::random_key();
@@ -555,16 +539,18 @@ impl Vault {
             allow: new.allow,
             max_grant_secs: new.max_grant_secs,
             fields: new.values.keys().cloned().collect(),
-            kind: new.kind,
+            destination: new.destination,
+            source: Source::Stored,
             sites,
             folder: clean_folder(new.folder),
             // A new value: whoever saw the old one no longer matters.
             rotate: Vec::new(),
+            unknown_fields: BTreeMap::new(),
             version: next_version(&tx)?,
         };
         let payload = crypto::seal(
             &dk,
-            &payload_aad(&id, meta.level, meta.kind),
+            &payload_aad(&meta)?,
             &zeroize::Zeroizing::new(serde_json::to_vec(&new.values)?),
         );
         let sealed_meta = crypto::seal(&self.vk, &meta_aad(&id), &serde_json::to_vec(&meta)?);
@@ -589,7 +575,8 @@ impl Vault {
 
     /// Changes the allowlist, grant cap and websites of a secret without
     /// touching its values, so it needs no biometric check even at level 4.
-    /// The level and kind cannot change this way: the values are bound to them.
+    /// The level and destination cannot change this way: the values are
+    /// bound to them. A secret this version cannot use cannot be changed.
     pub fn update_rules(
         &self,
         name: &str,
@@ -599,10 +586,8 @@ impl Vault {
         folder: Option<String>,
     ) -> Result<ItemMeta> {
         let mut meta = self.meta(name)?;
-        if meta.kind == Kind::Login && !allow.is_empty() {
-            return Err(Error::Vault("a login is used on websites, not with commands".into()));
-        }
-        meta.sites = check_sites(meta.kind, &sites)?;
+        provider::of(&meta).map_err(Error::Vault)?;
+        meta.sites = check_rules(&meta.destination, &allow, &sites)?;
         meta.allow = allow;
         meta.max_grant_secs = max_grant_secs;
         meta.folder = clean_folder(folder);
@@ -632,7 +617,7 @@ impl Vault {
     }
 
     /// Stores changed metadata as a new version, the values untouched.
-    fn write_meta(&self, mut meta: ItemMeta) -> Result<ItemMeta> {
+    pub(crate) fn write_meta(&self, mut meta: ItemMeta) -> Result<ItemMeta> {
         let sealed_meta = crypto::seal(&self.vk, &meta_aad(&meta.id), &serde_json::to_vec(&meta)?);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
@@ -667,6 +652,11 @@ impl Vault {
         struct Sealed {
             payload: Vec<u8>,
             wrapped: Vec<u8>,
+        }
+
+        // Before any biometric check: this version could not open them.
+        for meta in items {
+            provider::of(meta).map_err(Error::Vault)?;
         }
 
         let sealed: Vec<Sealed> = {
@@ -706,7 +696,7 @@ impl Vault {
                 Some(n) => crypto::key_from_slice(&unlocked[n])?,
                 None => crypto::key_from_slice(&crypto::open(&self.vk, &wrap_aad(&meta.id), &sealed[i].wrapped)?)?,
             };
-            let plain = crypto::open(&dk, &payload_aad(&meta.id, meta.level, meta.kind), &sealed[i].payload)?;
+            let plain = crypto::open(&dk, &payload_aad(meta)?, &sealed[i].payload)?;
             out.push(serde_json::from_slice(&plain)?);
         }
         Ok(out)
@@ -1283,7 +1273,7 @@ mod tests {
             values: values(&[("value", value)]),
             allow: vec![],
             max_grant_secs: 600,
-            kind: Kind::Secret,
+            destination: Destination::Command,
             sites: vec![],
             folder: None,
         }
@@ -1296,7 +1286,7 @@ mod tests {
             values: values(fields),
             allow: vec![],
             max_grant_secs: 600,
-            kind: Kind::Login,
+            destination: Destination::Website,
             sites: sites.iter().map(|s| s.to_string()).collect(),
             folder: None,
         }
@@ -1400,7 +1390,7 @@ mod tests {
             )
             .unwrap();
         assert!(crypto::open(&vault.vk, &wrap_aad(&a.id), &wrapped).is_err());
-        assert!(crypto::open(&vault.vk, &payload_aad(&a.id, a.level, a.kind), &payload).is_err());
+        assert!(crypto::open(&vault.vk, &payload_aad(&a).unwrap(), &payload).is_err());
     }
 
     #[test]
@@ -1438,7 +1428,7 @@ mod tests {
                 &["https://GitHub.com/login", "github.com", "*.github.com"],
             ))
             .unwrap();
-        assert_eq!(meta.kind, Kind::Login);
+        assert_eq!(meta.destination, Destination::Website);
         assert_eq!(meta.sites, ["github.com", "*.github.com"], "normalized, without repeats");
         assert_eq!(meta.fields, ["password", "totp", "username"]);
         let stored = vault.meta("github").unwrap();
@@ -1478,8 +1468,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault = vault(&dir);
         let mut meta = vault.put(login("github", &[("password", "pw")], &["github.com"])).unwrap();
-        meta.kind = Kind::Secret;
+        meta.destination = Destination::Command;
         assert!(vault.reveal(&[&meta], "").is_err());
+    }
+
+    /// What a newer device wrote, as a device of this version sees it.
+    fn from_a_newer_version(vault: &Vault, name: &str, edit: impl FnOnce(&mut ItemMeta)) -> ItemMeta {
+        let mut meta = vault.put(item(name, Level::Biometric, "x")).unwrap();
+        edit(&mut meta);
+        meta.unknown_fields.insert("targets".into(), serde_json::json!(["ReadOnly"]));
+        vault.write_meta(meta).unwrap()
+    }
+
+    #[test]
+    fn a_secret_from_a_newer_version_is_listed_kept_and_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        let keys = SoftwareKeys::generate(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            true
+        });
+        let vault = Vault::create(&dir.path().join("v.db"), Arc::new(keys), "test").unwrap();
+        from_a_newer_version(&vault, "FILE", |m| m.destination = Destination::Other("file".into()));
+        from_a_newer_version(&vault, "AWS", |m| m.source = Source::Other("aws_sso".into()));
+
+        for name in ["FILE", "AWS"] {
+            let meta = vault.meta(name).unwrap();
+            let refused = vault.reveal(&[&meta], "p").err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(refused.contains("newer version of Mayi"), "{name}: {refused}");
+            assert!(vault.update_rules(name, vec![], 60, vec![], None).is_err(), "{name}");
+
+            // Rotation warnings still apply, and keep what this version does not know.
+            let note = RotateNote { who: "old-vm".into(), why: "revoked".into(), at_ms: 1 };
+            vault.flag_rotation(&[name.to_string()], note).unwrap();
+            let flagged = vault.meta(name).unwrap();
+            assert_eq!(flagged.rotate.len(), 1);
+            assert_eq!(flagged.destination, meta.destination);
+            assert_eq!(flagged.source, meta.source);
+            assert_eq!(flagged.unknown_fields.get("targets"), Some(&serde_json::json!(["ReadOnly"])));
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "refused before any fingerprint");
     }
 
     #[test]

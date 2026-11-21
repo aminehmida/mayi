@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use mayi_proto::site::{self, Origin};
-use mayi_proto::{RunRequest, SecretInfo, FIELD_TOTP};
+use mayi_proto::{RunRequest, SecretInfo};
 use zeroize::Zeroizing;
 
 use crate::grants::{Grant, GrantScope, GrantStore};
-use crate::model::{ItemMeta, Kind, Level, SecretValues};
+use crate::model::{Destination, ItemMeta, Level, SecretValues};
 use crate::policy::{self, Ctx, Rules, Verdict, Via};
-use crate::totp::Totp;
+use crate::provider::{self, Provider};
 use crate::vault::{AuditEntry, SecretUse, Vault};
 use crate::{now_ms, Error};
 
@@ -125,6 +125,7 @@ struct ActiveRun {
 
 struct Plan {
     meta: ItemMeta,
+    provider: &'static dyn Provider,
     level: Level,
     verdict: Verdict,
     grant: Option<Grant>,
@@ -165,7 +166,7 @@ impl Broker {
                 name: m.name,
                 level: m.level as u8,
                 fields: m.fields,
-                login: m.kind == Kind::Login,
+                login: m.destination == Destination::Website,
                 sites: m.sites,
             })
             .collect())
@@ -278,6 +279,8 @@ impl Broker {
                 continue;
             }
             let meta = self.vault.meta(&binding.item).map_err(|e| e.to_string())?;
+            // Refused before anyone is asked: this device could not release it.
+            let provider = provider::of(&meta)?;
             let grant = lock(&self.grants).find(
                 &meta.id,
                 meta.version,
@@ -287,20 +290,20 @@ impl Broker {
                 now,
             );
             let (level, verdict) = policy::decide(&meta, &ctx, &self.rules, grant.is_some());
-            plans.push(Plan { meta, level, verdict, grant });
+            plans.push(Plan { meta, provider, level, verdict, grant });
         }
         // Where the values may go is settled before anyone is asked: a login
         // never reaches a command, and never a page outside its websites.
         for plan in &plans {
             let name = &plan.meta.name;
-            match (&site, plan.meta.kind) {
-                (None, Kind::Login) => {
+            match (&site, &plan.meta.destination) {
+                (None, Destination::Website) => {
                     return Err(format!(
                         "{name} is a login: it can only be typed into its website, with `mayi fill`"
                     ))
                 }
-                (Some(_), Kind::Secret) => return Err(format!("{name} is not a login")),
-                (Some(origin), Kind::Login) if !site::matches_any(&plan.meta.sites, origin) => {
+                (Some(_), Destination::Command) => return Err(format!("{name} is not a login")),
+                (Some(origin), Destination::Website) if !site::matches_any(&plan.meta.sites, origin) => {
                     return Err(format!("{name} is for {}, not {origin}", plan.meta.sites.join(", ")))
                 }
                 _ => {}
@@ -382,20 +385,25 @@ impl Broker {
             }
         }
 
+        // Each provider makes what is released from what is stored: a
+        // login's two-factor key stays here and the page gets the code.
+        let now_secs = now_ms() / 1000;
+        let mut released: HashMap<&str, SecretValues> = HashMap::new();
+        for plan in &plans {
+            let name = plan.meta.name.as_str();
+            let fields: Vec<&str> =
+                request.bindings.iter().filter(|b| b.item == name).map(|b| b.field.as_str()).collect();
+            let stored = values.get(name).ok_or_else(|| format!("{name} could not be opened"))?;
+            let out = plan.provider.release(stored, &fields, now_secs).map_err(|e| format!("{name}: {e}"))?;
+            released.insert(name, out);
+        }
         let mut env = BTreeMap::new();
         for binding in &request.bindings {
-            let value = values
+            let value = released
                 .get(binding.item.as_str())
                 .and_then(|v| v.get(&binding.field))
                 .ok_or_else(|| format!("secret {} has no field {}", binding.item, binding.field))?;
-            // The two-factor key stays here: the page gets the current code.
-            let value = if binding.field == FIELD_TOTP && site.is_some() {
-                let now_secs = now_ms() / 1000;
-                Totp::parse(value).map_err(|e| format!("{}: {e}", binding.item))?.code(now_secs)
-            } else {
-                value.clone()
-            };
-            env.insert(binding.env.clone(), value);
+            env.insert(binding.env.clone(), value.clone());
         }
 
         let mut grants = lock(&self.grants);
@@ -503,7 +511,7 @@ fn biometric_prompt(site: Option<&Origin>, request: &RunRequest, requester: &Req
 mod tests {
     use super::*;
     use crate::hardware::SoftwareKeys;
-    use crate::model::NewItem;
+    use crate::model::{NewItem, Source};
     use mayi_proto::Binding;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
@@ -562,7 +570,7 @@ mod tests {
                         .collect(),
                     allow,
                     max_grant_secs: 600,
-                    kind: Kind::Secret,
+                    destination: Destination::Command,
                     sites: vec![],
                     folder: None,
                 })
@@ -579,7 +587,7 @@ mod tests {
                         .collect(),
                     allow: vec![],
                     max_grant_secs: 600,
-                    kind: Kind::Login,
+                    destination: Destination::Website,
                     sites: vec!["github.com".into(), "*.github.com".into()],
                     folder: None,
                 })
@@ -649,6 +657,21 @@ mod tests {
         assert_eq!(log[0].reason, "testing");
         assert_eq!(log[0].secrets[0].name, "L1");
         assert!(!serde_json::to_string(&log).unwrap().contains("L1-secret"));
+    }
+
+    #[test]
+    fn a_secret_from_a_newer_version_is_refused_before_anyone_is_asked() {
+        let f = fixture();
+        *lock(&f.ui.answer) = Some(GrantScope::Once);
+        let mut meta = f.broker.vault().meta("L3").unwrap();
+        meta.source = Source::Other("aws_sso".into());
+        f.broker.vault().write_meta(meta).unwrap();
+
+        let reason = denied(f.broker.run(&request(&["L1", "L3"], "aws s3 ls", "s"), &local()));
+        assert!(reason.starts_with("L3: ") && reason.contains("newer version of Mayi"), "{reason}");
+        assert_eq!(f.ui.prompts.load(Ordering::SeqCst), 0);
+        assert!(f.broker.list().unwrap().iter().any(|s| s.name == "L3"), "still listed");
+        released(f.broker.run(&request(&["L1"], "aws s3 ls", "s"), &local()));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use mayi_core::broker::{Approval, Broker, Notice, Prompt, Ui};
 use mayi_core::grants::GrantScope;
 use mayi_core::hardware::SoftwareKeys;
-use mayi_core::model::{Kind, Level, NewItem};
+use mayi_core::model::{Destination, Level, NewItem};
 use mayi_core::policy::Rules;
 use mayi_core::server::{join_vault, Server};
 use mayi_core::vault::Vault;
@@ -106,7 +106,7 @@ fn setup_with(allow: &[&str]) -> Setup {
         values: [("value".to_string(), Zeroizing::new("s3cret".to_string()))].into_iter().collect(),
         allow: allow.iter().map(|s| s.to_string()).collect(),
         max_grant_secs: 600,
-        kind: Kind::Secret,
+        destination: Destination::Command,
         sites: vec![],
         folder: None,
     };
