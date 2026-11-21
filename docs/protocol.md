@@ -25,7 +25,7 @@ Device to requester:
 |---|---|---|
 | `released` | `run_id`, `env` | The values to inject, by environment variable. |
 | `denied` | `reason` | The request was refused. |
-| `secrets` | `secrets` | Reply to `list`: name, level, field names, and for a login `login: true` and its `sites`. Never contains a value. |
+| `secrets` | `secrets` | Reply to `list`: name, level, field names, for a login `login: true` and its `sites`, and for an AWS sign-in `aws` (its `start_url`, `region` and `profiles`, each with `name`, `level`, `account_id`, `account_name` and `role`). Never contains a value. |
 | `stop` | | The user pressed Stop: kill the command. |
 | `paired` | `device` | Pairing succeeded; `device` is the vault device's name. |
 | `peers` | `devices`, `sender`, `sender_active` | Each device's name, tunnel key, port and addresses; the replying device's own tunnel key; and whether its owner is using it right now. |
@@ -49,6 +49,17 @@ grants on that form. An expected command written by name (`gh *`) matches
 the command with `argv[0]` as given, only when `argv[0]` is a bare name and
 `program` is outside temporary folders. Without `program` (requesters before
 alpha.9) the command is matched as given.
+
+### AWS sign-ins
+
+A binding for an AWS sign-in names a profile and a field: `field` is
+`PROFILE/access_key_id`, `PROFILE/secret_access_key`, `PROFILE/session_token`
+or `PROFILE/expiration`, and every binding of one sign-in in a request names
+the same profile. The device fetches that role's credentials from AWS and
+releases them; the sign-in's own session is never released. The profile's
+level decides, and grants are kept per profile and level. `mayi aws
+credentials` sends such a request with the command of the AWS tool that
+started it as `argv`, and sends `done` as soon as it has the answer.
 
 ### Sign-ins
 

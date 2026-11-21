@@ -107,9 +107,10 @@ fn allowlisted(meta: &ItemMeta, ctx: &Ctx) -> bool {
     meta.allow.iter().any(|p| glob_match(p, ctx.command) || ctx.by_name.is_some_and(|c| glob_match(p, c)))
 }
 
-/// The secret's level after context is applied. Never below its own level.
-pub fn effective_level(meta: &ItemMeta, ctx: &Ctx, rules: &Rules) -> Level {
-    let mut level = meta.level;
+/// The level after context is applied, starting from `base`: the secret's
+/// own level, or the requested profile's for an AWS sign-in. Never below it.
+pub fn effective_level(meta: &ItemMeta, base: Level, ctx: &Ctx, rules: &Rules) -> Level {
+    let mut level = base;
     if ctx.remote {
         level = level.max(rules.remote_min.min(Level::Approve));
     }
@@ -120,8 +121,8 @@ pub fn effective_level(meta: &ItemMeta, ctx: &Ctx, rules: &Rules) -> Level {
     level
 }
 
-pub fn decide(meta: &ItemMeta, ctx: &Ctx, rules: &Rules, has_grant: bool) -> (Level, Verdict) {
-    let level = effective_level(meta, ctx, rules);
+pub fn decide(meta: &ItemMeta, base: Level, ctx: &Ctx, rules: &Rules, has_grant: bool) -> (Level, Verdict) {
+    let level = effective_level(meta, base, ctx, rules);
     let verdict = match level {
         Level::Log => Verdict::Release { notify: false, via: Via::Level },
         Level::Notify => Verdict::Release { notify: true, via: Via::Level },
@@ -154,6 +155,7 @@ mod tests {
             sites: vec![],
             folder: None,
             rotate: vec![],
+            aws: None,
             unknown_fields: Default::default(),
             version: 1,
         }
@@ -213,7 +215,7 @@ mod tests {
         for (i, (level, allow, command, remote, grant, want_level, want)) in
             cases.into_iter().enumerate()
         {
-            let got = decide(&meta(level, allow), &Ctx { command, by_name: None, remote }, &rules, grant);
+            let got = decide(&meta(level, allow), level, &Ctx { command, by_name: None, remote }, &rules, grant);
             assert_eq!(got, (want_level, want), "case {i}");
         }
     }
@@ -230,7 +232,7 @@ mod tests {
         let verdict = |r: &RunRequest| {
             let command = command_line(&r.shown_argv());
             let by_name = command_by_name(r);
-            decide(&gh, &Ctx { command: &command, by_name: by_name.as_deref(), remote: false }, &Rules::default(), false).1
+            decide(&gh, gh.level, &Ctx { command: &command, by_name: by_name.as_deref(), remote: false }, &Rules::default(), false).1
         };
         let allowed = Verdict::Release { notify: true, via: Via::Allowlist };
         // Looked up by the requester in an ordinary folder: shown by path, matched by name.
@@ -246,7 +248,7 @@ mod tests {
         let command = command_line(&r.shown_argv());
         let by_name = command_by_name(&r);
         let ctx = Ctx { command: &command, by_name: by_name.as_deref(), remote: false };
-        assert_eq!(decide(&pinned, &ctx, &Rules::default(), false).1, allowed);
+        assert_eq!(decide(&pinned, pinned.level, &ctx, &Rules::default(), false).1, allowed);
         // A requester from before alpha.9 sends no path: matched as before.
         assert_eq!(verdict(&request(&["gh", "pr"], None)), allowed);
     }
@@ -255,9 +257,9 @@ mod tests {
     fn rules_never_lower_and_never_reach_biometric() {
         let ctx = Ctx { command: "x", by_name: None, remote: true };
         let strict = Rules { remote_min: Level::Biometric, ..Rules::default() };
-        assert_eq!(effective_level(&meta(Level::Log, &[]), &ctx, &strict), Level::Approve);
+        assert_eq!(effective_level(&meta(Level::Log, &[]), Level::Log, &ctx, &strict), Level::Approve);
         let lax = Rules { remote_min: Level::Log, ..Rules::default() };
-        assert_eq!(effective_level(&meta(Level::Approve, &[]), &ctx, &lax), Level::Approve);
-        assert_eq!(effective_level(&meta(Level::Biometric, &[]), &ctx, &lax), Level::Biometric);
+        assert_eq!(effective_level(&meta(Level::Approve, &[]), Level::Approve, &ctx, &lax), Level::Approve);
+        assert_eq!(effective_level(&meta(Level::Biometric, &[]), Level::Biometric, &ctx, &lax), Level::Biometric);
     }
 }

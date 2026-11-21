@@ -66,6 +66,16 @@ enum Cmd {
         #[arg(long, default_value_t = 900)]
         max_grant: u64,
     },
+    /// Add an AWS sign-in: signs in through the browser, then offers every
+    /// role as a profile at its suggested level. With MAYI_DEVD_FAKE_AWS set,
+    /// a stand-in for AWS answers instead (for tests).
+    AddAws {
+        name: String,
+        #[arg(long)]
+        start_url: String,
+        #[arg(long)]
+        region: String,
+    },
     /// List secrets
     Ls,
     /// Delete a secret
@@ -393,6 +403,31 @@ fn report_sync(server: &Server) {
     }
 }
 
+/// AWS, or the stand-in when MAYI_DEVD_FAKE_AWS is set.
+fn aws_api() -> Arc<dyn mayi_core::aws::Api> {
+    if std::env::var_os("MAYI_DEVD_FAKE_AWS").is_some() {
+        Arc::new(mayi_core::aws::fake::FakeAws::default())
+    } else {
+        Arc::new(mayi_core::aws::HttpApi::default())
+    }
+}
+
+fn add_aws(name: String, start_url: String, region: String) -> Res<()> {
+    use mayi_core::aws::{suggest_profiles, SignIn};
+    let vault = open_vault(|_| false)?;
+    let api = aws_api();
+    let sign_in = SignIn::start(api.as_ref(), &start_url, &region)?;
+    println!("Open {} and allow Mayi (code {}).", sign_in.verification_url(), sign_in.user_code());
+    let session = sign_in.wait(api.as_ref(), &AtomicBool::new(false))?;
+    let profiles = suggest_profiles(&session.accounts(api.as_ref())?);
+    let aws = mayi_core::model::AwsSignIn { start_url: session.start_url.clone(), region, profiles };
+    let meta = vault.put_aws(&name, aws, session.values(), None)?;
+    for p in meta.aws.map(|a| a.profiles).unwrap_or_default() {
+        println!("{name}/{}\tlevel {}\t{} in {} ({})", p.name, p.level as u8, p.role, p.account_name, p.account_id);
+    }
+    Ok(())
+}
+
 fn serve(listen: Option<String>) -> Res<()> {
     let terminal = Arc::new(Terminal {
         waiter: Mutex::new(None),
@@ -407,7 +442,7 @@ fn serve(listen: Option<String>) -> Res<()> {
         ));
         answer == "yes"
     })?;
-    let server = Server::new(Broker::new(vault, terminal.clone(), Rules::default()));
+    let server = Server::new(Broker::with_aws(vault, terminal.clone(), Rules::default(), aws_api()));
 
     let socket = std::env::var_os("MAYI_SOCKET")
         .map(PathBuf::from)
@@ -550,6 +585,7 @@ fn main() -> ExitCode {
         Cmd::Add { name, login, sites, level, fields, allow, max_grant } => {
             add(AddArgs { name, login, sites, level, fields, allow, max_grant })
         }
+        Cmd::AddAws { name, start_url, region } => add_aws(name, start_url, region),
         Cmd::Ls => open_vault(|_| false).and_then(|vault| {
             for m in vault.list()? {
                 let allow = if m.allow.is_empty() { String::new() } else { format!("\tallow: {}", m.allow.join(" | ")) };

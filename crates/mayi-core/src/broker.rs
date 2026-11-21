@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use mayi_proto::site::{self, Origin};
-use mayi_proto::{RunRequest, SecretInfo};
+use mayi_proto::{AwsInfo, ProfileInfo, RunRequest, SecretInfo};
 use zeroize::Zeroizing;
 
+use crate::aws::{self, AwsProvider};
 use crate::grants::{Grant, GrantScope, GrantStore};
-use crate::model::{Destination, ItemMeta, Level, SecretValues};
+use crate::model::{AwsProfile, Destination, ItemMeta, Level, SecretValues, Source};
 use crate::policy::{self, Ctx, Rules, Verdict, Via};
-use crate::provider::{self, Provider};
+use crate::provider::{self, Provider, Refusal, Release};
 use crate::vault::{AuditEntry, SecretUse, Vault};
 use crate::{now_ms, Error};
 
@@ -43,6 +44,18 @@ pub struct Prompt<'a> {
     pub request: &'a RunRequest,
     pub requester: &'a Requester,
     pub secrets: Vec<PromptSecret>,
+}
+
+/// An AWS sign-in a request needs has ended: the owner can sign in again
+/// and the request carries on.
+pub struct SignInNeeded<'a> {
+    pub run_id: u64,
+    pub request: &'a RunRequest,
+    pub requester: &'a Requester,
+    /// The sign-in, by name.
+    pub name: &'a str,
+    pub start_url: &'a str,
+    pub region: &'a str,
 }
 
 pub struct Notice<'a> {
@@ -92,6 +105,14 @@ pub trait Ui: Send + Sync {
     /// Another machine just connected. A phone keeps itself awake for a
     /// moment so the request can arrive before it sleeps again.
     fn incoming(&self) {}
+
+    /// An AWS sign-in ended while a request needed it. Blocks while the
+    /// owner signs in again (the app saves the new session with
+    /// [`Vault::renew_aws`]); returns whether they did. Withdrawing the run
+    /// should make it return false.
+    fn sign_in(&self, _needed: &SignInNeeded) -> bool {
+        false
+    }
 }
 
 pub enum Outcome {
@@ -106,7 +127,11 @@ pub struct Broker {
     vault: Vault,
     ui: Arc<dyn Ui>,
     rules: Rules,
+    aws: AwsProvider,
     grants: Mutex<GrantStore>,
+    /// Sessions already told that a level 1 secret is used from another
+    /// machine: told once per session, not at every use.
+    noticed: Mutex<HashSet<(String, String, String)>>,
     /// Released runs whose command has not finished.
     active: Mutex<HashMap<u64, ActiveRun>>,
     /// Runs whose requester went away before a decision.
@@ -123,12 +148,30 @@ struct ActiveRun {
     site: String,
 }
 
-struct Plan {
+struct Plan<'a> {
     meta: ItemMeta,
-    provider: &'static dyn Provider,
+    provider: &'a dyn Provider,
+    /// For an AWS sign-in: the profile requested.
+    profile: Option<AwsProfile>,
+    /// The level before context: the profile's, or the secret's.
+    base: Level,
     level: Level,
     verdict: Verdict,
+    /// What grants are kept under: the secret, or one profile of a sign-in
+    /// at its level, so approving read-only never covers admin.
+    grant_key: (String, u64),
     grant: Option<Grant>,
+}
+
+impl Plan<'_> {
+    /// The secret as the owner knows it: `mawaqit/production-ro` for a
+    /// profile.
+    fn shown(&self) -> String {
+        match &self.profile {
+            Some(p) => format!("{}/{}", self.meta.name, p.name),
+            None => self.meta.name.clone(),
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -137,10 +180,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Broker {
     pub fn new(vault: Vault, ui: Arc<dyn Ui>, rules: Rules) -> Self {
+        Self::with_aws(vault, ui, rules, Arc::new(aws::HttpApi::default()))
+    }
+
+    /// A broker that reaches AWS through `api`: a stand-in in tests.
+    pub fn with_aws(vault: Vault, ui: Arc<dyn Ui>, rules: Rules, api: Arc<dyn aws::Api>) -> Self {
         Self {
             vault,
             ui,
             rules,
+            aws: AwsProvider::new(api),
+            noticed: Mutex::default(),
             grants: Mutex::default(),
             active: Mutex::default(),
             withdrawn: Mutex::default(),
@@ -156,6 +206,34 @@ impl Broker {
         &self.vault
     }
 
+    /// Releases AWS sign-ins; also lists a sign-in's accounts for the apps.
+    pub fn aws(&self) -> &AwsProvider {
+        &self.aws
+    }
+
+    /// The accounts and roles an AWS sign-in reaches, to add profiles
+    /// without signing in again.
+    pub fn aws_accounts(&self, name: &str) -> Result<Vec<aws::Account>, String> {
+        let meta = self.vault.meta(name).map_err(|e| e.to_string())?;
+        let stored = self.vault.reveal(&[&meta], "").map_err(|e| e.to_string())?.remove(0);
+        let (accounts, store) = self.aws.accounts(&meta, &stored).map_err(|e| match e {
+            Refusal::SignInNeeded(why) => format!("{why}: sign in again"),
+            Refusal::Failed(why) => why,
+        })?;
+        if let Some(values) = store {
+            let _ = self.vault.store_values(&meta, &values);
+        }
+        Ok(accounts)
+    }
+
+    fn provider(&self, meta: &ItemMeta) -> Result<&dyn Provider, String> {
+        provider::check_known(meta)?;
+        match meta.source {
+            Source::AwsSso => Ok(&self.aws),
+            _ => provider::stored(&meta.destination).map_err(|e| format!("{}: {e}", meta.name)),
+        }
+    }
+
     /// Names, levels and field names. Never values.
     pub fn list(&self) -> crate::Result<Vec<SecretInfo>> {
         Ok(self
@@ -168,6 +246,21 @@ impl Broker {
                 fields: m.fields,
                 login: m.destination == Destination::Website,
                 sites: m.sites,
+                aws: m.aws.map(|a| AwsInfo {
+                    start_url: a.start_url,
+                    region: a.region,
+                    profiles: a
+                        .profiles
+                        .into_iter()
+                        .map(|p| ProfileInfo {
+                            name: p.name,
+                            level: p.level as u8,
+                            account_id: p.account_id,
+                            account_name: p.account_name,
+                            role: p.role,
+                        })
+                        .collect(),
+                }),
             })
             .collect())
     }
@@ -272,6 +365,9 @@ impl Broker {
         let by_name = site.is_none().then(|| policy::command_by_name(request)).flatten();
         let ctx = Ctx { command: &command, by_name: by_name.as_deref(), remote: requester.remote };
         let now = now_ms();
+        let fields_of = |item: &str| -> Vec<&str> {
+            request.bindings.iter().filter(|b| b.item == item).map(|b| b.field.as_str()).collect()
+        };
 
         let mut plans: Vec<Plan> = Vec::new();
         for binding in &request.bindings {
@@ -280,17 +376,21 @@ impl Broker {
             }
             let meta = self.vault.meta(&binding.item).map_err(|e| e.to_string())?;
             // Refused before anyone is asked: this device could not release it.
-            let provider = provider::of(&meta)?;
-            let grant = lock(&self.grants).find(
-                &meta.id,
-                meta.version,
-                &requester.id,
-                &request.session,
-                &command,
-                now,
-            );
-            let (level, verdict) = policy::decide(&meta, &ctx, &self.rules, grant.is_some());
-            plans.push(Plan { meta, provider, level, verdict, grant });
+            let provider = self.provider(&meta)?;
+            let profile = match meta.source {
+                Source::AwsSso => Some(aws::requested_profile(&meta, &fields_of(&meta.name))?.clone()),
+                _ => None,
+            };
+            let base = profile.as_ref().map_or(meta.level, |p| p.level);
+            let grant_key = match &profile {
+                // The sign-in's own version changes when AWS replaces a
+                // token; the profile's level is part of the key instead.
+                Some(p) => (format!("{}#{}#{}#{}", meta.id, p.account_id, p.role, p.level as u8), 0),
+                None => (meta.id.clone(), meta.version),
+            };
+            let grant = lock(&self.grants).find(&grant_key.0, grant_key.1, &requester.id, &request.session, &command, now);
+            let (level, verdict) = policy::decide(&meta, base, &ctx, &self.rules, grant.is_some());
+            plans.push(Plan { meta, provider, profile, base, level, verdict, grant_key, grant });
         }
         // Where the values may go is settled before anyone is asked: a login
         // never reaches a command, and never a page outside its websites.
@@ -314,14 +414,15 @@ impl Broker {
         }
         for binding in &request.bindings {
             let plan = plans.iter().find(|p| p.meta.name == binding.item).expect("planned above");
-            if !plan.meta.fields.contains(&binding.field) {
+            // An AWS sign-in's fields were checked with its profile.
+            if plan.profile.is_none() && !plan.meta.fields.contains(&binding.field) {
                 return Err(format!("secret {} has no field {}", binding.item, binding.field));
             }
         }
         entry.secrets = plans
             .iter()
             .map(|p| SecretUse {
-                name: p.meta.name.clone(),
+                name: p.shown(),
                 level: p.level as u8,
                 via: match p.verdict {
                     Verdict::Release { via: Via::Level, .. } => "level",
@@ -344,7 +445,7 @@ impl Broker {
                 secrets: plans
                     .iter()
                     .map(|p| PromptSecret {
-                        name: p.meta.name.clone(),
+                        name: p.shown(),
                         level: p.level,
                         needs_approval: p.verdict == Verdict::Prompt,
                     })
@@ -356,20 +457,38 @@ impl Broker {
             }
         }
 
+        // A level 4 AWS profile: the sign-in is not encrypted to the
+        // fingerprint (every profile shares it), so the fingerprint is asked
+        // through the same hardware key, as proof of presence.
+        let presence: Vec<&Plan> = plans
+            .iter()
+            .filter(|p| p.verdict == Verdict::Biometric && p.meta.level != Level::Biometric)
+            .collect();
+        if !presence.is_empty() {
+            let names: Vec<String> = presence.iter().map(|p| p.shown()).collect();
+            self.vault
+                .confirm_presence(&biometric_prompt(site.as_ref(), request, requester, &names))
+                .map_err(|e| match e {
+                    Error::BiometricDenied => "biometric check failed or was cancelled".to_string(),
+                    other => other.to_string(),
+                })?;
+        }
+
         // Level 4 secrets not covered by a grant: one biometric check for all.
         // Everything else is readable with the vault key.
         let (biometric, plain): (Vec<&Plan>, Vec<&Plan>) = plans
             .iter()
             .filter(|p| p.grant.as_ref().is_none_or(|g| g.values.is_none()))
-            .partition(|p| p.verdict == Verdict::Biometric);
+            .partition(|p| p.verdict == Verdict::Biometric && p.meta.level == Level::Biometric);
         let mut values: HashMap<&str, SecretValues> = HashMap::new();
         for plan in &plans {
             if let Some(cached) = plan.grant.as_ref().and_then(|g| g.values.clone()) {
                 values.insert(&plan.meta.name, cached);
             }
         }
+        let biometric_names: Vec<String> = biometric.iter().map(|p| p.shown()).collect();
         for (group, text) in [
-            (&biometric, biometric_prompt(site.as_ref(), request, requester, &biometric)),
+            (&biometric, biometric_prompt(site.as_ref(), request, requester, &biometric_names)),
             (&plain, String::new()),
         ] {
             if group.is_empty() {
@@ -386,16 +505,16 @@ impl Broker {
         }
 
         // Each provider makes what is released from what is stored: a
-        // login's two-factor key stays here and the page gets the code.
+        // login's two-factor key stays here and the page gets the code; an
+        // AWS sign-in's session stays here and the command gets one role.
         let now_secs = now_ms() / 1000;
-        let mut released: HashMap<&str, SecretValues> = HashMap::new();
+        let mut released: HashMap<String, SecretValues> = HashMap::new();
         for plan in &plans {
             let name = plan.meta.name.as_str();
-            let fields: Vec<&str> =
-                request.bindings.iter().filter(|b| b.item == name).map(|b| b.field.as_str()).collect();
+            let fields = fields_of(name);
             let stored = values.get(name).ok_or_else(|| format!("{name} could not be opened"))?;
-            let out = plan.provider.release(stored, &fields, now_secs).map_err(|e| format!("{name}: {e}"))?;
-            released.insert(name, out);
+            let out = self.release(run_id, request, requester, plan, stored, &fields, now_secs)?;
+            released.insert(name.to_string(), out);
         }
         let mut env = BTreeMap::new();
         for binding in &request.bindings {
@@ -419,7 +538,9 @@ impl Broker {
                 Verdict::Biometric => (
                     false,
                     plan.meta.max_grant_secs.min(self.rules.biometric_window_secs),
-                    values.get(plan.meta.name.as_str()).cloned(),
+                    // Values kept only where they were encrypted to the
+                    // fingerprint; an AWS profile fetches again.
+                    (plan.meta.level == Level::Biometric).then(|| values.get(plan.meta.name.as_str()).cloned()).flatten(),
                 ),
                 _ => continue,
             };
@@ -428,8 +549,8 @@ impl Broker {
             }
             grants.add(Grant {
                 id: 0,
-                item_id: plan.meta.id.clone(),
-                item_version: plan.meta.version,
+                item_id: plan.grant_key.0.clone(),
+                item_version: plan.grant_key.1,
                 requester: requester.id.clone(),
                 session: request.session.clone(),
                 command: (!covers_any_command).then(|| command.clone()),
@@ -439,15 +560,75 @@ impl Broker {
         }
         drop(grants);
 
+        let mut noticed = lock(&self.noticed);
         let notified: Vec<String> = plans
             .iter()
             .filter(|p| matches!(p.verdict, Verdict::Release { notify: true, .. }))
-            .map(|p| p.meta.name.clone())
+            .filter(|p| {
+                // Level 1, raised only because the request is remote: once
+                // per session, not at every `aws` call.
+                let raised = p.base == Level::Log && requester.remote;
+                !raised || noticed.insert((requester.id.clone(), request.session.clone(), p.grant_key.0.clone()))
+            })
+            .map(|p| p.shown())
             .collect();
+        drop(noticed);
         if !notified.is_empty() {
             self.ui.notify(&Notice { run_id, request, requester, secrets: notified });
         }
         Ok(env)
+    }
+
+    /// Asks a plan's provider for its values. An AWS sign-in that ended is
+    /// signed in again through the app, if the owner wants, and asked once
+    /// more; a refresh token AWS replaced is kept.
+    #[allow(clippy::too_many_arguments)]
+    fn release(
+        &self,
+        run_id: u64,
+        request: &RunRequest,
+        requester: &Requester,
+        plan: &Plan,
+        stored: &SecretValues,
+        fields: &[&str],
+        now_secs: u64,
+    ) -> Result<SecretValues, String> {
+        let shown = plan.shown();
+        let mut meta = plan.meta.clone();
+        let mut stored = stored.clone();
+        let mut signed_in_again = false;
+        loop {
+            let asked = Release { meta: &meta, stored: &stored, fields, now_secs };
+            match plan.provider.release(&asked) {
+                Ok(out) => {
+                    if let Some(values) = out.store {
+                        // Kept in memory regardless; storing lets the other
+                        // devices and the next start use the new token.
+                        let _ = self.vault.store_values(&meta, &values);
+                    }
+                    return Ok(out.values);
+                }
+                Err(Refusal::SignInNeeded(why)) if !signed_in_again => {
+                    let aws = meta.aws.clone().unwrap_or_default();
+                    let needed = SignInNeeded {
+                        run_id,
+                        request,
+                        requester,
+                        name: &meta.name,
+                        start_url: &aws.start_url,
+                        region: &aws.region,
+                    };
+                    if lock(&self.withdrawn).contains(&run_id) || !self.ui.sign_in(&needed) {
+                        return Err(format!("{shown}: {why}. Sign in again in Mayi, then retry"));
+                    }
+                    signed_in_again = true;
+                    self.aws.forget(&meta.id);
+                    meta = self.vault.meta(&meta.name).map_err(|e| e.to_string())?;
+                    stored = self.vault.reveal(&[&meta], "").map_err(|e| e.to_string())?.remove(0);
+                }
+                Err(e) => return Err(format!("{shown}: {e}")),
+            }
+        }
     }
 
     /// The user pressed Stop on a released run: revoke every grant of that
@@ -494,8 +675,7 @@ impl Broker {
     }
 }
 
-fn biometric_prompt(site: Option<&Origin>, request: &RunRequest, requester: &Requester, plans: &[&Plan]) -> String {
-    let names: Vec<&str> = plans.iter().map(|p| p.meta.name.as_str()).collect();
+fn biometric_prompt(site: Option<&Origin>, request: &RunRequest, requester: &Requester, names: &[String]) -> String {
     match site {
         Some(origin) => format!("Sign in to {origin} with {} on {}", names.join(", "), requester.id),
         None => format!(
@@ -510,8 +690,9 @@ fn biometric_prompt(site: Option<&Origin>, request: &RunRequest, requester: &Req
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aws::fake::FakeAws;
     use crate::hardware::SoftwareKeys;
-    use crate::model::{NewItem, Source};
+    use crate::model::{AwsSignIn, NewItem, Source};
     use mayi_proto::Binding;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
@@ -520,6 +701,9 @@ mod tests {
         answer: Mutex<Option<GrantScope>>,
         prompts: AtomicUsize,
         notices: AtomicUsize,
+        sign_ins: AtomicUsize,
+        /// When set, "signing in again" brings this AWS session back.
+        revive: Mutex<Option<Arc<FakeAws>>>,
     }
 
     impl Ui for FakeUi {
@@ -533,6 +717,18 @@ mod tests {
 
         fn notify(&self, _: &Notice) {
             self.notices.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn sign_in(&self, needed: &SignInNeeded) -> bool {
+            assert_eq!(needed.start_url, "https://mawaqit.awsapps.com/start");
+            self.sign_ins.fetch_add(1, Ordering::SeqCst);
+            match &*lock(&self.revive) {
+                Some(api) => {
+                    api.session_alive.store(true, Ordering::SeqCst);
+                    true
+                }
+                None => false,
+            }
         }
     }
 
@@ -596,6 +792,120 @@ mod tests {
         let ui = Arc::new(FakeUi::default());
         let broker = Broker::new(vault, ui.clone(), Rules::default());
         Fixture { broker, ui, biometric_ok, biometric_checks, _dir: dir }
+    }
+
+    /// A vault with the AWS sign-in `mawaqit`: `production-ro` at level 1,
+    /// `development-admin` at 3, `production-admin` at 4. `access_lifetime`
+    /// is how long AWS's access tokens last.
+    fn aws_fixture(access_lifetime: u64) -> (Fixture, Arc<FakeAws>) {
+        let f = fixture();
+        let api = Arc::new(FakeAws::default());
+        *api.access_lifetime.lock().unwrap() = access_lifetime;
+        let sign_in = aws::SignIn::start(api.as_ref(), "https://mawaqit.awsapps.com/start", "eu-west-3").unwrap();
+        let session = sign_in.wait(api.as_ref(), &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        let profiles = aws::suggest_profiles(&session.accounts(api.as_ref()).unwrap());
+        let aws = AwsSignIn { start_url: session.start_url.clone(), region: session.region.clone(), profiles };
+        let Fixture { broker, ui, biometric_ok, biometric_checks, _dir } = f;
+        let vault = broker.vault;
+        vault.put_aws("mawaqit", aws, session.values(), None).unwrap();
+        let broker = Broker::with_aws(vault, ui.clone(), Rules::default(), api.clone());
+        (Fixture { broker, ui, biometric_ok, biometric_checks, _dir }, api)
+    }
+
+    fn aws_request(profile: &str, command: &str, session: &str) -> RunRequest {
+        RunRequest {
+            bindings: [("AWS_ACCESS_KEY_ID", "access_key_id"), ("AWS_SECRET_ACCESS_KEY", "secret_access_key")]
+                .iter()
+                .map(|(env, field)| Binding { env: env.to_string(), item: "mawaqit".into(), field: format!("{profile}/{field}") })
+                .collect(),
+            argv: command.split(' ').map(String::from).collect(),
+            reason: "testing".into(),
+            session: session.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn aws_profiles_have_their_own_levels() {
+        let (f, _api) = aws_fixture(3600);
+        let checks = || f.biometric_checks.load(Ordering::SeqCst);
+        let before = checks();
+
+        // Read-only: silent, logged under the profile's name.
+        let env = released(f.broker.run(&aws_request("production-ro", "aws s3 ls", "s"), &local()));
+        assert!(env["AWS_ACCESS_KEY_ID"].contains("136728947610ro"));
+        assert_eq!(f.ui.prompts.load(Ordering::SeqCst), 0);
+        assert_eq!(f.broker.vault().audit_tail(1).unwrap()[0].secrets[0].name, "mawaqit/production-ro");
+
+        // Level 3: asked; an approval for the session covers the same command.
+        assert_eq!(denied(f.broker.run(&aws_request("development-admin", "aws s3 rm x", "s"), &local())), "denied by the user");
+        *lock(&f.ui.answer) = Some(GrantScope::SessionAny);
+        released(f.broker.run(&aws_request("development-admin", "aws s3 rm x", "s"), &local()));
+        released(f.broker.run(&aws_request("development-admin", "aws s3 rm y", "s"), &local()));
+        assert_eq!(f.ui.prompts.load(Ordering::SeqCst), 2);
+
+        // Level 4: the fingerprint, whatever was approved for other profiles.
+        assert_eq!(checks(), before);
+        let env = released(f.broker.run(&aws_request("production-admin", "aws s3 rm x", "s"), &local()));
+        assert!(env["AWS_ACCESS_KEY_ID"].contains("136728947610admin"));
+        assert_eq!(checks(), before + 1);
+        released(f.broker.run(&aws_request("production-admin", "aws s3 rm x", "s"), &local()));
+        assert_eq!(checks(), before + 1, "the same command again within minutes");
+        f.biometric_ok.store(false, Ordering::SeqCst);
+        assert_eq!(
+            denied(f.broker.run(&aws_request("production-admin", "aws s3 rm z", "s"), &local())),
+            "biometric check failed or was cancelled"
+        );
+
+        // A profile the sign-in does not offer, or two at once, are refused.
+        assert!(denied(f.broker.run(&aws_request("staging-admin", "aws s3 ls", "s"), &local())).contains("no profile"));
+        let mut two = aws_request("production-ro", "aws s3 ls", "s");
+        two.bindings[1].field = "production-admin/secret_access_key".into();
+        assert!(denied(f.broker.run(&two, &local())).contains("one profile"));
+        assert_eq!(f.ui.prompts.load(Ordering::SeqCst), 2, "refused before anyone is asked");
+    }
+
+    #[test]
+    fn an_ended_aws_session_is_signed_in_again_while_the_request_waits() {
+        let (f, api) = aws_fixture(0);
+        api.session_alive.store(false, Ordering::SeqCst);
+        let reason = denied(f.broker.run(&aws_request("production-ro", "aws s3 ls", "s"), &local()));
+        assert!(reason.contains("Sign in again in Mayi"), "{reason}");
+        assert_eq!(f.ui.sign_ins.load(Ordering::SeqCst), 1);
+
+        *lock(&f.ui.revive) = Some(api.clone());
+        released(f.broker.run(&aws_request("production-ro", "aws s3 ls", "s"), &local()));
+        assert_eq!(f.ui.sign_ins.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_replaced_aws_refresh_token_is_kept_in_the_vault() {
+        let (f, api) = aws_fixture(0);
+        api.rotate.store(true, Ordering::SeqCst);
+        let before = f.broker.vault().meta("mawaqit").unwrap();
+        let stored = |m: &ItemMeta| f.broker.vault().reveal(&[m], "").unwrap().remove(0);
+        let old = stored(&before);
+        released(f.broker.run(&aws_request("production-ro", "aws s3 ls", "s"), &local()));
+        let after = f.broker.vault().meta("mawaqit").unwrap();
+        assert!(after.version > before.version);
+        assert_ne!(stored(&after)["refresh_token"], old["refresh_token"]);
+        assert_eq!(after.aws, before.aws, "profiles untouched");
+    }
+
+    #[test]
+    fn a_level_1_profile_used_remotely_notifies_once_per_session() {
+        let (f, _api) = aws_fixture(3600);
+        let vm = Requester { id: "build-mac".into(), remote: true };
+        for _ in 0..3 {
+            released(f.broker.run(&aws_request("production-ro", "aws s3 ls", "claude-1"), &vm));
+        }
+        assert_eq!(f.ui.notices.load(Ordering::SeqCst), 1);
+        released(f.broker.run(&aws_request("production-ro", "aws s3 ls", "claude-2"), &vm));
+        assert_eq!(f.ui.notices.load(Ordering::SeqCst), 2);
+        // A secret the owner set to level 2 still notifies at every use.
+        released(f.broker.run(&request(&["L2"], "x", "claude-1"), &vm));
+        released(f.broker.run(&request(&["L2"], "x", "claude-1"), &vm));
+        assert_eq!(f.ui.notices.load(Ordering::SeqCst), 4);
     }
 
     fn request(items: &[&str], command: &str, session: &str) -> RunRequest {
@@ -664,7 +974,7 @@ mod tests {
         let f = fixture();
         *lock(&f.ui.answer) = Some(GrantScope::Once);
         let mut meta = f.broker.vault().meta("L3").unwrap();
-        meta.source = Source::Other("aws_sso".into());
+        meta.source = Source::Other("gcloud".into());
         f.broker.vault().write_meta(meta).unwrap();
 
         let reason = denied(f.broker.run(&request(&["L1", "L3"], "aws s3 ls", "s"), &local()));

@@ -327,6 +327,38 @@ its items unless the program uses the hardened runtime. Still to do by hand:
 - [ ] A tool only in the project (`node_modules/.bin`) fails with "give its
       path", and works when given as `./node_modules/.bin/…`.
 
+## Providers and AWS sign-ins (v0.1.0-alpha.10 and alpha.11)
+
+Automated tests cover a secret of a newer kind listed, synced and kept
+intact but never opened; AWS profiles at their own levels (silent, approved,
+fingerprinted), approvals that do not cross profiles, a remote level 1
+profile notifying once per session, an ended session signed in again while
+the request waits, a replaced refresh token kept, loosening a profile or a
+secret asking for the fingerprint, AWS CLI profiles written and replaced,
+and `PROFILE/FIELD` requests checked. AWS itself is a stand-in in those
+tests. Still to do by hand, against a real portal:
+
+- [ ] Secrets → Add → AWS Sign-In suggests your portals; the browser opens
+      AWS's page with the code filled in, and the page names Mayi.
+- [ ] After allowing, every account and role is listed with the suggested
+      levels; saving removes the AWS CLI's files for that portal from
+      `~/.aws/sso/cache` and adds `NAME-PROFILE` profiles to `~/.aws/config`.
+- [ ] `aws sts get-caller-identity --profile NAME-production-ro` answers at
+      once; a level 4 profile asks for Touch ID, with the AWS command in the
+      dialog; a level 3 one shows the approval panel with the AWS command.
+- [ ] From Claude Code, an approval "for this session" covers the next
+      `aws` commands of that session.
+- [ ] Lowering a profile's level, or adding a role with Find More Roles, asks
+      for Touch ID even with the window unlocked; cancelling changes nothing.
+- [ ] After AWS ends the session (8 hours), the next request shows "Sign in
+      to NAME again?"; signing in lets the waiting command finish.
+- [ ] The phone answers a request for a level 1 and a level 4 profile when
+      the Mac is away (fingerprint for level 4).
+- [ ] From a paired machine, `mayi aws setup` writes the profiles there, and
+      a level 1 profile notifies once per agent session, not per command.
+- [ ] Running `aws sso login` again shows a warning on the sign-in, and
+      Remove deletes the file.
+
 ## Decisions waiting for you
 
 - [x] The repository `aminehmida/mayi` is public.

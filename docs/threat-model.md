@@ -305,6 +305,66 @@ What holds:
   the browser. `mayi browser` gives the agent a separate profile, so your
   everyday sessions are not in it.
 
+### AWS sign-ins
+
+An AWS IAM Identity Center sign-in is held by vault devices. A request names
+one of its profiles (an account and a role); the vault device fetches that
+role's temporary credentials from AWS and releases only those.
+
+What holds:
+
+- **The session never leaves vault devices.** Its access and refresh tokens
+  can fetch credentials for every role the owner has, so nothing returns
+  them: not `mayi`, not the apps (even to the owner), not the audit log. A
+  request for a field other than a profile's credentials is refused.
+- **Each profile has its own level, and approvals do not cross profiles.**
+  A grant is kept per profile and level, so approving a read-only role for
+  a session never covers an admin role, and raising a level drops what was
+  granted under the old one.
+- **Only configured profiles are released.** A role the owner did not add is
+  refused before anyone is asked.
+- **Loosening needs the owner's finger.** Adding a profile or lowering one's
+  level asks for Touch ID (or the phone's fingerprint), through the same
+  hardware key as level 4, even in a window left unlocked. So does lowering
+  any secret's level, adding expected commands or websites, or lengthening
+  its grants. An agent driving the screen cannot do it alone.
+- **AWS's own sign-in stays the strong step.** Signing in happens in the
+  owner's browser, with their identity provider and two-factor; AWS names
+  the app asking ("Mayi"). The vault device refreshes the session silently,
+  as the AWS CLI does, until AWS ends it (8 hours by default).
+- **The AWS CLI's plain-file copies are removed.** `~/.aws/sso/cache` holds
+  the same kind of session in a file any program can read. Mayi removes the
+  copies for portals it holds, and flags one that comes back.
+
+**Limits.**
+
+- **Level 4 on a profile is a check, not encryption.** The session is shared
+  by every role, so it is stored like a level 1 to 3 secret; a profile at
+  level 4 asks for the fingerprint, through the hardware key, before its
+  credentials are fetched. Malware past Mayi's own protections on a vault
+  device (see "Malware running as the owner on a vault device") can use the
+  session for any role, as it could read any level 1 to 3 secret. Real
+  separation between roles needs separate AWS identities: Mayi holds each as
+  its own sign-in.
+- **Released credentials live as long as AWS says.** A command given a
+  role's credentials, or an agent reading that command's environment, can
+  keep them until they expire: 1 to 12 hours, the permission set's session
+  length. Mayi cannot shorten or revoke them. A proxy that signs requests
+  without handing out credentials is planned (`docs/providers.md`).
+- **The agent can still ask AWS itself.** An agent that runs `aws sso login`
+  opens AWS's approval page in the owner's browser; if the owner allows it,
+  the AWS CLI's file copy is back. Mayi flags the file, and the page names
+  the app asking; allow only "Mayi".
+- **`credential_process` hands credentials to the AWS tool.** With the AWS
+  CLI profiles Mayi writes, `aws configure export-credentials` prints a
+  profile's credentials, without the masking `mayi run` applies. For level 1
+  and 2 profiles that happens without asking; the owner sees the command in
+  Activity, and in the prompt for levels 3 and 4.
+- **Refresh tokens and several devices.** Each vault device refreshes the
+  session on its own. If AWS replaces the refresh token, the device keeps
+  the new one and syncs it; two devices refreshing at the same moment can
+  leave one of them asking the owner to sign in again.
+
 ## Things Mayi does not try to do
 
 - Sandbox the commands it releases secrets to, or restrict where they send

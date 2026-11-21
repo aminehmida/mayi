@@ -10,15 +10,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use mayi_core::broker::{Approval, Broker, Notice, Prompt, Requester, Ui};
+use mayi_core::aws;
+use mayi_core::broker::{Approval, Broker, Notice, Prompt, Requester, SignInNeeded, Ui};
 use mayi_core::crypto::Key;
 use mayi_core::grants::GrantScope;
 use mayi_core::hardware::HardwareKeys;
-use mayi_core::model::{Destination, ItemMeta, Level, NewItem};
+use mayi_core::model::{AwsProfile, AwsSignIn, Destination, ItemMeta, Level, NewItem};
 use mayi_core::policy::{command_line, Rules};
 use mayi_core::server::{JoinCode, Server};
 use mayi_core::vault::Vault;
-use mayi_proto::RunRequest;
+use mayi_proto::{awscli, RunRequest};
 use zeroize::Zeroizing;
 
 uniffi::setup_scaffolding!();
@@ -174,6 +175,23 @@ pub trait UiDelegate: Send + Sync {
     /// Another machine just connected: a phone stays awake for a moment so
     /// its request can arrive.
     fn incoming(&self);
+    /// An AWS sign-in ended while a request needed it. Blocks while the
+    /// owner signs in again (`AwsSignInFlow`, then
+    /// `VaultDevice.renew_aws_sign_in`); returns whether they did, and the
+    /// request carries on. Return false at once where signing in is not
+    /// offered, and when `withdraw` is called for the run.
+    fn sign_in_needed(&self, needed: AwsSignInNeededInfo) -> bool;
+}
+
+/// An AWS sign-in a waiting request needs has ended.
+#[derive(Clone, uniffi::Record)]
+pub struct AwsSignInNeededInfo {
+    pub run_id: u64,
+    pub request: RequestInfo,
+    /// The sign-in, by name.
+    pub name: String,
+    pub start_url: String,
+    pub region: String,
 }
 
 struct UiAdapter(Arc<dyn UiDelegate>);
@@ -255,6 +273,16 @@ impl Ui for UiAdapter {
     fn incoming(&self) {
         self.0.incoming();
     }
+
+    fn sign_in(&self, needed: &SignInNeeded) -> bool {
+        self.0.sign_in_needed(AwsSignInNeededInfo {
+            run_id: needed.run_id,
+            request: request_info(needed.request, needed.requester),
+            name: needed.name.to_string(),
+            start_url: needed.start_url.to_string(),
+            region: needed.region.to_string(),
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -303,6 +331,174 @@ pub struct SecretRecord {
     pub folder: Option<String>,
     /// Who may still know the value: replace it at its source, or dismiss.
     pub rotate: Vec<RotateNoteRecord>,
+    /// For an AWS sign-in: its portal and profiles.
+    pub aws: Option<AwsSignInRecord>,
+}
+
+/// An AWS sign-in: where it signs in, and its profiles. Its session is
+/// never shown, even to the owner.
+#[derive(Clone, uniffi::Record)]
+pub struct AwsSignInRecord {
+    pub start_url: String,
+    pub region: String,
+    pub profiles: Vec<AwsProfileRecord>,
+    /// The AWS CLI on this device holds a sign-in to the same portal in a
+    /// plain file again (someone ran `aws sso login`): any program can read
+    /// it. Offer to remove it (`aws_forget_cli_sign_ins`).
+    pub cli_has_sign_in: bool,
+}
+
+/// One role of an AWS sign-in that requests may use, with its own level.
+#[derive(Clone, uniffi::Record)]
+pub struct AwsProfileRecord {
+    /// What requests name: `NAME/PROFILE`; the AWS CLI profile is
+    /// `NAME-PROFILE`.
+    pub name: String,
+    pub account_id: String,
+    pub account_name: String,
+    pub role: String,
+    pub level: u8,
+}
+
+/// An AWS account a sign-in reaches, with its roles.
+#[derive(Clone, uniffi::Record)]
+pub struct AwsAccountRecord {
+    pub id: String,
+    pub name: String,
+    pub roles: Vec<String>,
+}
+
+/// A portal the AWS CLI on this device already knows, to suggest.
+#[derive(Clone, uniffi::Record)]
+pub struct AwsPortalRecord {
+    pub start_url: String,
+    pub region: String,
+}
+
+impl From<AwsProfile> for AwsProfileRecord {
+    fn from(p: AwsProfile) -> Self {
+        Self { name: p.name, account_id: p.account_id, account_name: p.account_name, role: p.role, level: p.level as u8 }
+    }
+}
+
+impl TryFrom<AwsProfileRecord> for AwsProfile {
+    type Error = MayiError;
+
+    fn try_from(p: AwsProfileRecord) -> Result<Self, MayiError> {
+        Ok(Self {
+            name: p.name,
+            account_id: p.account_id,
+            account_name: p.account_name,
+            role: p.role,
+            level: Level::try_from(p.level).map_err(|detail| MayiError::Failed { detail })?,
+        })
+    }
+}
+
+impl From<aws::Account> for AwsAccountRecord {
+    fn from(a: aws::Account) -> Self {
+        Self { id: a.id, name: a.name, roles: a.roles }
+    }
+}
+
+fn aws_error(e: aws::AwsError) -> MayiError {
+    MayiError::Failed { detail: e.to_string() }
+}
+
+/// Portals the AWS CLI on this device knows, from its config and saved
+/// sign-ins: suggestions when adding an AWS sign-in.
+#[uniffi::export]
+pub fn aws_known_portals() -> Vec<AwsPortalRecord> {
+    awscli::portals().into_iter().map(|p| AwsPortalRecord { start_url: p.start_url, region: p.region }).collect()
+}
+
+/// A profile for every role, named like AWS CLI profiles, with suggested
+/// levels: read-only roles 1, roles that can change production 4, others 3.
+#[uniffi::export]
+pub fn aws_suggest_profiles(accounts: Vec<AwsAccountRecord>) -> Vec<AwsProfileRecord> {
+    let accounts: Vec<aws::Account> =
+        accounts.into_iter().map(|a| aws::Account { id: a.id, name: a.name, roles: a.roles }).collect();
+    aws::suggest_profiles(&accounts).into_iter().map(Into::into).collect()
+}
+
+/// Removes the sign-ins the AWS CLI on this device saved in plain files for
+/// `start_url`, and the role credentials it cached. Returns how many files
+/// went.
+#[uniffi::export]
+pub fn aws_forget_cli_sign_ins(start_url: String) -> Result<u32, MayiError> {
+    Ok(awscli::forget_sign_ins(&start_url)? as u32)
+}
+
+/// Signing in to an AWS portal from this device: open `verification_url`
+/// in the browser, where the owner signs in with AWS as usual and allows
+/// "Mayi"; `wait` returns once they have.
+#[derive(uniffi::Object)]
+pub struct AwsSignInFlow {
+    flow: aws::SignIn,
+    api: aws::HttpApi,
+    cancelled: AtomicBool,
+}
+
+#[uniffi::export]
+impl AwsSignInFlow {
+    /// Registers with AWS and starts the sign-in: blocks on the network
+    /// briefly, so call it off the main thread.
+    #[uniffi::constructor]
+    pub fn start(start_url: String, region: String) -> Result<Arc<Self>, MayiError> {
+        no_sigpipe();
+        let api = aws::HttpApi::default();
+        let flow = aws::SignIn::start(&api, &start_url, &region).map_err(aws_error)?;
+        Ok(Arc::new(Self { flow, api, cancelled: AtomicBool::new(false) }))
+    }
+
+    /// The code AWS's page shows, for the owner to compare.
+    pub fn user_code(&self) -> String {
+        self.flow.user_code().to_string()
+    }
+
+    /// AWS's approval page, with the code filled in.
+    pub fn verification_url(&self) -> String {
+        self.flow.verification_url().to_string()
+    }
+
+    /// The start URL, normalized.
+    pub fn start_url(&self) -> String {
+        self.flow.start_url.clone()
+    }
+
+    /// Blocks until the owner allows it in the browser, the code expires,
+    /// or `cancel` is called.
+    pub fn wait(&self) -> Result<Arc<AwsSession>, MayiError> {
+        let session = self.flow.wait(&self.api, &self.cancelled).map_err(aws_error)?;
+        Ok(Arc::new(AwsSession { session, api: aws::HttpApi::default() }))
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A finished sign-in, before it is saved.
+#[derive(uniffi::Object)]
+pub struct AwsSession {
+    session: aws::Session,
+    api: aws::HttpApi,
+}
+
+#[uniffi::export]
+impl AwsSession {
+    /// Every account and role the sign-in reaches. Blocks on the network.
+    pub fn accounts(&self) -> Result<Vec<AwsAccountRecord>, MayiError> {
+        Ok(self.session.accounts(&self.api).map_err(aws_error)?.into_iter().map(Into::into).collect())
+    }
+
+    pub fn start_url(&self) -> String {
+        self.session.start_url.clone()
+    }
+
+    pub fn region(&self) -> String {
+        self.session.region.clone()
+    }
 }
 
 /// A machine revoked or a device removed that may still know a secret.
@@ -367,6 +563,12 @@ impl From<ItemMeta> for SecretRecord {
                 .into_iter()
                 .map(|n| RotateNoteRecord { who: n.who, why: n.why, at_ms: n.at_ms })
                 .collect(),
+            aws: m.aws.map(|a| AwsSignInRecord {
+                cli_has_sign_in: awscli::has_cached_sign_in(&a.start_url),
+                start_url: a.start_url,
+                region: a.region,
+                profiles: a.profiles.into_iter().map(Into::into).collect(),
+            }),
         }
     }
 }
@@ -756,6 +958,62 @@ impl VaultDevice {
             .vault()
             .put(NewItem { name, level, values, allow, max_grant_secs, destination, sites, folder })?
             .into())
+    }
+
+    /// Saves a new AWS sign-in under `name`, offering `profiles`.
+    pub fn put_aws_sign_in(
+        &self,
+        name: String,
+        session: Arc<AwsSession>,
+        profiles: Vec<AwsProfileRecord>,
+        folder: Option<String>,
+    ) -> Result<SecretRecord, MayiError> {
+        let profiles = profiles.into_iter().map(AwsProfile::try_from).collect::<Result<Vec<_>, _>>()?;
+        let aws = AwsSignIn { start_url: session.session.start_url.clone(), region: session.session.region.clone(), profiles };
+        Ok(self.vault().put_aws(&name, aws, session.session.values(), folder)?.into())
+    }
+
+    /// Replaces the session of the AWS sign-in `name` after signing in
+    /// again, keeping its profiles.
+    pub fn renew_aws_sign_in(&self, name: String, session: Arc<AwsSession>) -> Result<SecretRecord, MayiError> {
+        let meta = self.vault().renew_aws(&name, session.session.values())?;
+        self.server.broker().aws().forget(&meta.id);
+        Ok(meta.into())
+    }
+
+    /// Changes the profiles of the AWS sign-in `name`. Adding one or
+    /// lowering a level asks for the owner's fingerprint first; it fails if
+    /// they cancel.
+    pub fn update_aws_profiles(&self, name: String, profiles: Vec<AwsProfileRecord>) -> Result<SecretRecord, MayiError> {
+        let profiles = profiles.into_iter().map(AwsProfile::try_from).collect::<Result<Vec<_>, _>>()?;
+        Ok(self.vault().update_aws_profiles(&name, profiles)?.into())
+    }
+
+    /// Writes an AWS CLI profile for each profile of each AWS sign-in into
+    /// this device's AWS CLI config (`aws --profile NAME-PROFILE`), getting
+    /// credentials from `mayi` at `mayi_path`, and replacing what Mayi wrote
+    /// there before. With `include` false, removes Mayi's profiles instead.
+    /// Returns the names written.
+    pub fn write_aws_cli_profiles(&self, mayi_path: String, include: bool) -> Result<Vec<String>, MayiError> {
+        let mut profiles = Vec::new();
+        for meta in self.vault().list()?.into_iter().filter(|_| include) {
+            let Some(aws) = meta.aws else { continue };
+            for p in aws.profiles {
+                profiles.push(awscli::Profile {
+                    name: format!("{}-{}", meta.name, p.name),
+                    command: awscli::credentials_command(&mayi_path, &meta.name, &p.name),
+                    region: aws.region.clone(),
+                });
+            }
+        }
+        Ok(awscli::write_profiles(&profiles)?.written)
+    }
+
+    /// The accounts and roles the AWS sign-in `name` reaches, to add
+    /// profiles without signing in again. Blocks on the network.
+    pub fn aws_accounts(&self, name: String) -> Result<Vec<AwsAccountRecord>, MayiError> {
+        let accounts = self.server.broker().aws_accounts(&name).map_err(|detail| MayiError::Failed { detail })?;
+        Ok(accounts.into_iter().map(Into::into).collect())
     }
 
     /// The owner decided a secret flagged for rotation needs none.

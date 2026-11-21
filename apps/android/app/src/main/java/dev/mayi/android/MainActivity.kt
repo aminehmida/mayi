@@ -807,6 +807,11 @@ private fun NoticeCard(active: MayiController.ActiveNotice, onStop: () -> Unit, 
 // --- Secrets ----------------------------------------------------------------------
 
 private fun summary(secret: SecretRecord): String {
+    secret.aws?.let { aws ->
+        val host = android.net.Uri.parse(aws.startUrl).host ?: aws.startUrl
+        val roles = aws.profiles.joinToString { "${it.name} ${it.level}" }
+        return "AWS sign-in to $host. Profiles: $roles"
+    }
     if (secret.login) {
         val sites = "Signs in to " + secret.sites.joinToString()
         return if ("totp" in secret.fields) "$sites, with a two-factor code" else sites
@@ -932,7 +937,11 @@ private fun Secrets(
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                     },
-                    trailingContent = { LevelLabel(secret.level.toInt()) },
+                    trailingContent = {
+                        val aws = secret.aws
+                        if (aws != null) Text(if (aws.profiles.size == 1) "1 profile" else "${aws.profiles.size} profiles")
+                        else LevelLabel(secret.level.toInt())
+                    },
                     modifier = Modifier.clickable { detail = secret },
                 )
             }
@@ -977,11 +986,19 @@ private fun Secrets(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(secret.name, style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Monospace)
-                LevelLabel(secret.level.toInt(), color = scheme.onSurface)
-                Text(
-                    (if (secret.login) loginLevelDetails else levelDetails)[secret.level.toInt() - 1],
-                    style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
-                )
+                if (secret.aws == null) {
+                    LevelLabel(secret.level.toInt(), color = scheme.onSurface)
+                    Text(
+                        (if (secret.login) loginLevelDetails else levelDetails)[secret.level.toInt() - 1],
+                        style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
+                    )
+                } else {
+                    Text(
+                        "Each profile has its own level, and this phone answers requests for them. " +
+                            "Signing in to AWS and changing profiles happen in Mayi on your Mac for now.",
+                        style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
+                    )
+                }
                 Text(summary(secret) + ".", style = MaterialTheme.typography.bodyMedium)
                 secret.folder?.let { name ->
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1005,7 +1022,7 @@ private fun Secrets(
                     }
                 }
                 Spacer(Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (secret.aws == null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
                         showing = true
                         editing = secret

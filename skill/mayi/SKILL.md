@@ -17,7 +17,9 @@ mayi list
 
 Each line is `NAME`, a level, and the field names. A line ending in
 `login for github.com` is a website login: it can only be typed into that
-website with `mayi fill` (below), never given to a command. Levels:
+website with `mayi fill` (below), never given to a command. A line like
+`mawaqit/production-ro  level 1  aws role ro in production (136728947610)`
+is a profile of an AWS sign-in (below). Levels:
 
 | Level | What happens when you ask |
 |---|---|
@@ -42,6 +44,28 @@ mayi run -s GITHUB_TOKEN -r "List open pull requests for the release notes" -- g
   `mayi run -s API_KEY -r "..." -- sh -c 'curl -H "Authorization: Bearer $API_KEY" https://api.example.com/v1/items'`
 - The command's own exit code is returned. Output passes through with any
   secret value replaced by `[masked]`.
+
+## Use AWS
+
+AWS access comes from the user's AWS sign-ins in Mayi, one role (profile) at
+a time. Each profile has its own level, so read-only roles often answer at
+once and production roles ask the user.
+
+- If `~/.aws/config` has profiles named like the `mayi list` lines with `-`
+  for `/` (`mawaqit-production-ro`), use them as usual:
+  `aws s3 ls --profile mawaqit-production-ro`. Terraform and SDKs take
+  `AWS_PROFILE=mawaqit-production-ro`. The user sees each AWS command.
+- Otherwise: `mayi run --aws mawaqit/production-ro -r "List the buckets" -- aws s3 ls`.
+  It sets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`
+  for that one command.
+- Use the least powerful profile that does the job: a read-only one to look,
+  a write one only for the change itself.
+- Never run `aws sso login`, never read `~/.aws/sso` or `~/.aws/cli`, and
+  never run `aws configure export-credentials`. If AWS says the session
+  expired, wait: Mayi asks the user to sign in again and your command
+  carries on.
+- A level 4 profile waits for the user's fingerprint: run long AWS commands
+  in the background, as below.
 
 ## Sign in to a website
 

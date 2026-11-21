@@ -17,7 +17,7 @@ public struct SecretDraft: Equatable {
         }
     }
 
-    public enum Change: Equatable {
+    public enum Change: Equatable, Sendable {
         /// Store new values (creating the secret or replacing it).
         case put(
             name: String, level: UInt8, values: [String: String], allow: [String], maxGrantSecs: UInt64,

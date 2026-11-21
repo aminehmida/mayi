@@ -2,6 +2,7 @@
 //! with them. Stores no secret: only, once paired with a device on another
 //! machine, its own tunnel key and where to find that device.
 
+mod aws;
 mod browser;
 mod cdp;
 mod config;
@@ -21,7 +22,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use mayi_proto::noise::{self, PairingToken, MODE_PAIRING};
-use mayi_proto::{read_frame, write_frame, Binding, ClientMsg, RunRequest, ServerMsg, DEFAULT_FIELD};
+use mayi_proto::{read_frame, write_frame, Binding, ClientMsg, RunRequest, SecretInfo, ServerMsg, DEFAULT_FIELD};
 
 use config::{Config, Device};
 use mask::Masker;
@@ -46,8 +47,13 @@ enum Cmd {
     /// Run a command with secrets injected as environment variables
     Run {
         /// Secret to inject: ENV=NAME, ENV=NAME/FIELD, or NAME (same env name)
-        #[arg(short, long = "secret", value_name = "ENV=NAME[/FIELD]", required = true)]
+        #[arg(short, long = "secret", value_name = "ENV=NAME[/FIELD]", required_unless_present = "aws")]
         secrets: Vec<String>,
+        /// A profile of an AWS sign-in, as `mayi list` shows it: its role's
+        /// credentials go into AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
+        /// AWS_SESSION_TOKEN
+        #[arg(long, value_name = "NAME/PROFILE")]
+        aws: Option<String>,
         /// Why the secrets are needed; shown to the user and logged
         #[arg(short, long)]
         reason: String,
@@ -132,6 +138,11 @@ enum Cmd {
         #[arg(long)]
         remote: bool,
     },
+    /// AWS sign-ins in Mayi, for the AWS CLI, Terraform and the SDKs
+    Aws {
+        #[command(subcommand)]
+        command: AwsCmd,
+    },
     /// Start a Chrome for your agent, with a debugging port mayi fill can use
     Browser {
         /// Debugging port to listen on, on this machine only
@@ -140,6 +151,37 @@ enum Cmd {
         /// Run without a window
         #[arg(long)]
         headless: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AwsCmd {
+    /// Add an AWS CLI profile for each profile of your AWS sign-ins in Mayi
+    ///
+    /// Each is named NAME-PROFILE (`aws --profile mawaqit-production-ro`) and
+    /// gets its credentials from Mayi, asking according to the profile's
+    /// level. Also removes the sign-ins the AWS CLI saved in plain files for
+    /// the same portals, which any program could read.
+    Setup {
+        /// Leave the AWS CLI's saved sign-ins in place
+        #[arg(long)]
+        keep_cli_sign_ins: bool,
+        /// Skip the vault device on this machine and use a paired one
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Print the credentials of NAME/PROFILE for the AWS CLI
+    /// (`credential_process`, as `mayi aws setup` writes it)
+    Credentials {
+        /// The profile, as `mayi list` shows it
+        target: String,
+        #[arg(long, env = "MAYI_WAIT", default_value_t = 3600)]
+        wait: u64,
+        #[arg(long, env = "MAYI_TIMEOUT", default_value_t = 900)]
+        timeout: u64,
+        /// Skip the vault device on this machine and use a paired one
+        #[arg(long)]
+        remote: bool,
     },
 }
 
@@ -233,8 +275,10 @@ impl Patience {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     secrets: Vec<String>,
+    aws_profile: Option<String>,
     reason: String,
     agent: Option<String>,
     session: Option<String>,
@@ -242,11 +286,14 @@ fn run(
     remote: bool,
     command: Vec<String>,
 ) -> Result<u8, Failure> {
-    let bindings = secrets
+    let mut bindings = secrets
         .iter()
         .map(|s| parse_binding(s))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (EXIT_USAGE, e))?;
+    if let Some(target) = &aws_profile {
+        bindings.extend(aws::bindings(target)?);
+    }
     let (agent, session) = requester_identity(agent, session);
     // Looked up here, outside the working folder and temporary folders, and
     // run from exactly this path, which the owner is shown.
@@ -282,6 +329,11 @@ fn run(
     child_cmd.arg0(&command[0]).args(&command[1..]);
     for (key, _) in std::env::vars_os().filter(|(key, _)| program::dropped(key)) {
         child_cmd.env_remove(key);
+    }
+    if aws_profile.is_some() {
+        for key in aws::OVERRIDING {
+            child_cmd.env_remove(key);
+        }
     }
     child_cmd
         .env("PATH", program::search_path(&dirs))
@@ -336,21 +388,32 @@ fn run(
     Ok(code.unwrap_or(1) as u8)
 }
 
-fn list(remote: bool) -> Result<u8, Failure> {
+/// The secrets the vault device lists: names, levels, fields, never values.
+fn secrets(remote: bool) -> Result<Vec<SecretInfo>, Failure> {
     let Channel { reader, mut writer } = reach::any(remote, Duration::from_secs(10))?;
     write_frame(&mut writer, &ClientMsg::List)
         .map_err(|e| (EXIT_UNAVAILABLE, format!("vault device connection lost: {e}")))?;
     match replies(reader).recv_timeout(Duration::from_secs(10)) {
-        Ok(ServerMsg::Secrets { secrets }) => {
-            for s in secrets {
-                let sites = if s.login { format!("\tlogin for {}", s.sites.join(", ")) } else { String::new() };
-                println!("{}\tlevel {}\t{}{sites}", s.name, s.level, s.fields.join(","));
-            }
-            Ok(0)
-        }
+        Ok(ServerMsg::Secrets { secrets }) => Ok(secrets),
         Ok(ServerMsg::Error { message }) => Err((EXIT_UNAVAILABLE, message)),
         _ => Err((EXIT_UNAVAILABLE, "no usable reply from the vault device".into())),
     }
+}
+
+fn list(remote: bool) -> Result<u8, Failure> {
+    for s in secrets(remote)? {
+        if let Some(aws) = &s.aws {
+            // One line per profile: what `mayi run --aws` takes.
+            for p in &aws.profiles {
+                let account = if p.account_name.is_empty() { p.account_id.clone() } else { format!("{} ({})", p.account_name, p.account_id) };
+                println!("{}/{}\tlevel {}\taws role {} in {account}", s.name, p.name, p.level, p.role);
+            }
+            continue;
+        }
+        let sites = if s.login { format!("\tlogin for {}", s.sites.join(", ")) } else { String::new() };
+        println!("{}\tlevel {}\t{}{sites}", s.name, s.level, s.fields.join(","));
+    }
+    Ok(0)
 }
 
 fn pair(token: String, name: Option<String>) -> Result<u8, Failure> {
@@ -414,8 +477,12 @@ fn devices() -> Result<u8, Failure> {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Cmd::Run { secrets, reason, agent, session, wait, timeout, remote, command } => {
-            run(secrets, reason, agent, session, Patience::secs(wait, timeout), remote, command)
+        Cmd::Run { secrets, aws, reason, agent, session, wait, timeout, remote, command } => {
+            run(secrets, aws, reason, agent, session, Patience::secs(wait, timeout), remote, command)
+        }
+        Cmd::Aws { command: AwsCmd::Setup { keep_cli_sign_ins, remote } } => aws::setup(remote, keep_cli_sign_ins),
+        Cmd::Aws { command: AwsCmd::Credentials { target, wait, timeout, remote } } => {
+            aws::credentials(&target, Patience::secs(wait, timeout), remote)
         }
         Cmd::List { remote } => list(remote),
         Cmd::Pair { token, name } => pair(token, name),

@@ -2,6 +2,7 @@ package dev.mayi.android
 
 import dev.mayi.ffi.ApprovalChoice
 import dev.mayi.ffi.AuditRecord
+import dev.mayi.ffi.AwsSignInNeededInfo
 import dev.mayi.ffi.DeviceInfo
 import dev.mayi.ffi.KeyStore
 import dev.mayi.ffi.MachineRecord
@@ -135,6 +136,13 @@ class MayiController(
     override fun userActive(): Boolean = userActive.invoke()
 
     override fun incoming() = onIncoming()
+
+    /**
+     * An AWS sign-in ended while a request needed it. Signing in to AWS from
+     * the phone comes in a later version: the request is refused with a
+     * message to sign in again in Mayi on the Mac.
+     */
+    override fun signInNeeded(needed: AwsSignInNeededInfo): Boolean = false
 
     // --- Called by the screens ------------------------------------------------
 

@@ -80,6 +80,10 @@ pub enum Source {
     /// read the same to versions that came before sources.
     #[default]
     Stored,
+    /// An AWS IAM Identity Center sign-in: the values are its session, and
+    /// what is released is the credentials of one of its profiles, fetched
+    /// by the vault device (see `aws.rs`).
+    AwsSso,
     /// One added by a newer version of Mayi: listed and synced, never
     /// released here.
     Other(String),
@@ -95,6 +99,7 @@ impl From<String> for Source {
     fn from(name: String) -> Self {
         match name.as_str() {
             "stored" => Self::Stored,
+            "aws_sso" => Self::AwsSso,
             _ => Self::Other(name),
         }
     }
@@ -104,9 +109,31 @@ impl From<Source> for String {
     fn from(source: Source) -> String {
         match source {
             Source::Stored => "stored".into(),
+            Source::AwsSso => "aws_sso".into(),
             Source::Other(name) => name,
         }
     }
+}
+
+/// One role of an AWS sign-in that requests may use, under a name of the
+/// owner's choosing, with its own level.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwsProfile {
+    pub name: String,
+    pub account_id: String,
+    #[serde(default)]
+    pub account_name: String,
+    pub role: String,
+    pub level: Level,
+}
+
+/// What is not secret about an AWS sign-in: where it signs in, and the
+/// profiles it offers. Kept with the metadata, so listing never decrypts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwsSignIn {
+    pub start_url: String,
+    pub region: String,
+    pub profiles: Vec<AwsProfile>,
 }
 
 /// Field name to value.
@@ -140,6 +167,9 @@ pub struct ItemMeta {
     /// removed. Cleared by saving a new value, or dismissed by the owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rotate: Vec<RotateNote>,
+    /// For an AWS sign-in: its portal and profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<AwsSignIn>,
     /// Fields written by a newer version of Mayi, kept as they are so that
     /// changing this secret here does not strip them.
     #[serde(flatten)]
@@ -205,11 +235,11 @@ mod tests {
     fn what_a_newer_version_wrote_survives_a_round_trip() {
         let mut newer = base();
         newer["kind"] = "file".into();
-        newer["source"] = "aws_sso".into();
+        newer["source"] = "gcloud".into();
         newer["targets"] = serde_json::json!([{ "name": "ReadOnly", "level": 1 }]);
         let read = meta(newer.clone());
         assert_eq!(read.destination, Destination::Other("file".into()));
-        assert_eq!(read.source, Source::Other("aws_sso".into()));
+        assert_eq!(read.source, Source::Other("gcloud".into()));
         assert!(read.unknown_fields.contains_key("targets"));
         assert_eq!(serde_json::to_value(&read).unwrap(), newer);
     }

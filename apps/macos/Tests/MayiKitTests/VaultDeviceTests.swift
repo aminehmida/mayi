@@ -182,10 +182,10 @@ import Testing
 @Suite struct SecretDraftTests {
     let stored = SecretRecord(
         name: "DB", level: 4, fields: ["user", "password"], allow: ["psql *"], maxGrantSecs: 600, version: 1,
-        login: false, sites: [], copies: 1, folder: nil, rotate: [])
+        login: false, sites: [], copies: 1, folder: nil, rotate: [], aws: nil)
     let storedLogin = SecretRecord(
         name: "github", level: 3, fields: ["password", "totp", "username"], allow: [], maxGrantSecs: 600, version: 1,
-        login: true, sites: ["github.com"], copies: 2, folder: nil, rotate: [])
+        login: true, sites: ["github.com"], copies: 2, folder: nil, rotate: [], aws: nil)
 
     @Test func newSecretNeedsNameAndValues() {
         var draft = SecretDraft()

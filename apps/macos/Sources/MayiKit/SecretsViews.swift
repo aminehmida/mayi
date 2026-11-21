@@ -17,7 +17,7 @@ public struct SecretEditor: View {
     /// Drops the note that this secret should be rotated; returns an error.
     let onDismissRotation: (() -> String?)?
     @State private var rotationDismissed = false
-    let onSave: (SecretDraft.Change) -> String?
+    let onSave: (SecretDraft.Change) async -> String?
     let onCancel: () -> Void
     @State var draft: SecretDraft
     @State var error: String?
@@ -27,7 +27,7 @@ public struct SecretEditor: View {
         existing: SecretRecord?, draft: SecretDraft? = nil, error: String? = nil,
         onReveal: (() async -> Result<RevealedSecret, DraftError>)? = nil, revealOnOpen: Bool = false,
         loadsAtOnce: Bool = false, folders: [String] = [], onDismissRotation: (() -> String?)? = nil,
-        onSave: @escaping (SecretDraft.Change) -> String?, onCancel: @escaping () -> Void
+        onSave: @escaping (SecretDraft.Change) async -> String?, onCancel: @escaping () -> Void
     ) {
         self.existing = existing
         self.onReveal = onReveal
@@ -175,7 +175,7 @@ public struct SecretEditor: View {
                     .keyboardShortcut(.cancelAction)
                 Button(existing == nil ? (draft.login ? "Add Login" : "Add Secret") : "Save") {
                     switch draft.change(existing: existing) {
-                    case .success(let change): error = onSave(change)
+                    case .success(let change): Task { error = await onSave(change) }
                     case .failure(let problem): error = problem.message
                     }
                 }
@@ -334,6 +334,11 @@ struct SecretRow: View {
 
     /// What the secret holds and which commands it is meant for, as a sentence.
     private var summary: String {
+        if let aws = secret.aws {
+            let host = URL(string: aws.startUrl)?.host ?? aws.startUrl
+            let roles = aws.profiles.map { "\($0.name) \($0.level)" }.joined(separator: ", ")
+            return "AWS sign-in to \(host). " + (aws.profiles.isEmpty ? "No profiles" : "Profiles: " + roles)
+        }
         if secret.login {
             let sites = "Signs in to " + secret.sites.joined(separator: ", ")
             return secret.fields.contains("totp") ? sites + ", with a two-factor code" : sites
@@ -350,10 +355,10 @@ struct SecretRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: secret.login ? "globe" : "key")
+            Image(systemName: secret.aws != nil ? "cloud" : secret.login ? "globe" : "key")
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
-                .accessibilityLabel(secret.login ? "Website login" : "Secret")
+                .accessibilityLabel(secret.aws != nil ? "AWS sign-in" : secret.login ? "Website login" : "Secret")
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     if !secret.rotate.isEmpty {
@@ -369,13 +374,24 @@ struct SecretRow: View {
                     if secret.copies < 2 {
                         OneCopyDot()
                     }
+                    if secret.aws?.cliHasSignIn == true {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .symbolRenderingMode(.multicolor)
+                            .help("The AWS CLI saved a sign-in to this portal again: open it to remove it")
+                    }
                 }
                 Text(summary).font(.callout).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            LevelLabel(level: secret.level)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            if let aws = secret.aws {
+                Text(aws.profiles.count == 1 ? "1 profile" : "\(aws.profiles.count) profiles")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                LevelLabel(level: secret.level)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 4)
     }
@@ -540,8 +556,30 @@ public struct SecretsView: View {
     @State private var query = ""
     @State private var selection: String?
     @State private var editor: EditorTarget?
+    @State private var aws: AwsTarget?
     @State private var confirmDelete: String?
     @State private var error: String?
+
+    private enum AwsTarget: Identifiable {
+        case new
+        case edit(SecretRecord)
+
+        var id: String {
+            switch self {
+            case .new: return ""
+            case .edit(let secret): return secret.name
+            }
+        }
+    }
+
+    /// Opens a secret where it is edited: an AWS sign-in has its own editor.
+    private func open(_ secret: SecretRecord, showing: Bool = false) {
+        if secret.aws != nil {
+            aws = .edit(secret)
+        } else {
+            editor = showing ? .show(secret) : .edit(secret)
+        }
+    }
 
     private enum EditorTarget: Identifiable {
         case new
@@ -585,7 +623,9 @@ public struct SecretsView: View {
         let words = query.lowercased().split(separator: " ").map(String.init)
         return model.secrets.filter { secret in
             guard folder == nil || secret.folder == folder else { return false }
-            let text = ([secret.name, secret.folder ?? ""] + secret.sites + secret.fields).joined(separator: " ").lowercased()
+            let profiles = secret.aws.map { [$0.startUrl] + $0.profiles.flatMap { [$0.name, $0.role, $0.accountName] } } ?? []
+            let text = ([secret.name, secret.folder ?? ""] + secret.sites + secret.fields + profiles)
+                .joined(separator: " ").lowercased()
             return words.allSatisfy { text.contains($0) }
         }
     }
@@ -593,28 +633,31 @@ public struct SecretsView: View {
     public var body: some View {
         List(selection: $selection) {
             ForEach(shown, id: \.name) { secret in
-                SecretRow(secret: secret, onOpen: { editor = .edit(secret) }).tag(secret.name)
+                SecretRow(secret: secret, onOpen: { open(secret) }).tag(secret.name)
             }
         }
         .searchable(text: $query, prompt: "Search secrets")
         .listStyle(.inset)
         .contextMenu(forSelectionType: String.self) { names in
             if let secret = secret(names.first) {
-                Button("Show Values\u{2026}") { editor = .show(secret) }
-                Button("Edit\u{2026}") { editor = .edit(secret) }
+                if secret.aws == nil {
+                    Button("Show Values\u{2026}") { editor = .show(secret) }
+                }
+                Button("Edit\u{2026}") { open(secret) }
                 Button("Delete\u{2026}", role: .destructive) { confirmDelete = secret.name }
             }
         } primaryAction: { names in
-            if let secret = secret(names.first) { editor = .edit(secret) }
+            if let secret = secret(names.first) { open(secret) }
         }
         .overlay {
             if model.secrets.isEmpty {
                 ContentUnavailableView {
                     Label("No Secrets", systemImage: "key")
                 } description: {
-                    Text("Add an API key, a token or a website login. An agent then uses it by name, with mayi run or mayi fill, and never sees the value.")
+                    Text("Add an API key, a token, a website login or an AWS sign-in. An agent then uses it by name, with mayi run, mayi fill or aws --profile, and never sees the value.")
                 } actions: {
                     Button("Add Secret") { editor = .new }
+                    Button("Add AWS Sign-In") { aws = .new }
                 }
             } else if shown.isEmpty, !query.isEmpty {
                 ContentUnavailableView.search(text: query)
@@ -633,10 +676,10 @@ public struct SecretsView: View {
                 } label: {
                     Label("Show Values", systemImage: "eye")
                 }
-                .disabled(secret(selection) == nil)
+                .disabled(secret(selection) == nil || secret(selection)?.aws != nil)
                 .help("Show the selected secret's values, after you confirm")
                 Button {
-                    if let secret = secret(selection) { editor = .edit(secret) }
+                    if let secret = secret(selection) { open(secret) }
                 } label: {
                     Label("Edit", systemImage: "pencil")
                 }
@@ -649,12 +692,15 @@ public struct SecretsView: View {
                 }
                 .disabled(secret(selection) == nil)
                 .help("Delete the selected secret")
-                Button {
-                    editor = .new
+                Menu {
+                    Button("Secret or Login\u{2026}") { editor = .new }
+                    Button("AWS Sign-In\u{2026}") { aws = .new }
                 } label: {
-                    Label("Add Secret", systemImage: "plus")
+                    Label("Add", systemImage: "plus")
+                } primaryAction: {
+                    editor = .new
                 }
-                .help("Add a secret")
+                .help("Add a secret, a website login or an AWS sign-in")
             }
         }
         .sheet(item: $editor) { target in
@@ -667,11 +713,17 @@ public struct SecretsView: View {
                 folders: model.folders,
                 onDismissRotation: target.existing.map { secret in { model.dismissRotation(name: secret.name) } },
                 onSave: { change in
-                    let problem = apply(change)
+                    let problem = await model.save(change)
                     if problem == nil { editor = nil }
                     return problem
                 },
                 onCancel: { editor = nil })
+        }
+        .sheet(item: $aws) { target in
+            switch target {
+            case .new: AwsSignInSheet(model: model, folder: folder) { aws = nil }
+            case .edit(let secret): AwsSignInEditor(model: model, secret: secret) { aws = nil }
+            }
         }
         .confirmationDialog(
             "Delete \(confirmDelete ?? "")?", isPresented: .constant(confirmDelete != nil), presenting: confirmDelete
@@ -694,16 +746,6 @@ public struct SecretsView: View {
         return draft
     }
 
-    private func apply(_ change: SecretDraft.Change) -> String? {
-        switch change {
-        case .put(let name, let level, let values, let allow, let maxGrantSecs, let login, let sites, let folder):
-            return model.saveSecret(
-                name: name, level: level, values: values, allow: allow, maxGrantSecs: maxGrantSecs, login: login,
-                sites: sites, folder: folder)
-        case .rules(let name, let allow, let maxGrantSecs, let sites, let folder):
-            return model.updateRules(name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites, folder: folder)
-        }
-    }
 }
 
 // MARK: Activity

@@ -94,6 +94,110 @@ pub fn agent_process() -> Option<Process> {
     None
 }
 
+/// The nearest process above `process` that is not a shell or a wrapper.
+fn above(process: &Process) -> Option<Process> {
+    let mut pid = process.ppid;
+    for _ in 0..16 {
+        let p = info(pid)?;
+        if p.pid <= 1 {
+            return None;
+        }
+        if !PASS_THROUGH.contains(&base(&p.name)) {
+            return Some(p);
+        }
+        pid = p.ppid;
+    }
+    None
+}
+
+/// For `mayi aws credentials`, which the AWS CLI or an SDK runs: the tool
+/// that asked (whose command the owner is shown), and the agent and session
+/// above it (so an approval for the session covers its next commands, as
+/// with `mayi run`).
+pub struct Caller {
+    pub tool: Option<Process>,
+    pub agent: Option<String>,
+    pub session: String,
+}
+
+pub fn caller() -> Caller {
+    let tool = agent_process();
+    let owner = tool.as_ref().and_then(above);
+    let session = match owner.as_ref().or(tool.as_ref()) {
+        Some(p) => format!("{} (pid {}, since {})", base(&p.name), p.pid, clock(p.started)),
+        None => format!("ppid:{}", parent_id()),
+    };
+    Caller { agent: owner.map(|p| base(&p.name).to_string()), tool, session }
+}
+
+/// A process's arguments, as it was started.
+#[cfg(target_os = "macos")]
+pub fn arguments(pid: u32) -> Option<Vec<String>> {
+    // KERN_PROCARGS2: argc, then the executable's path, NUL padding, then
+    // argc NUL-terminated arguments (and the environment, not read).
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size: libc::size_t = 0;
+    // SAFETY: a size query with a null buffer, then a read into a buffer of
+    // the size the kernel gave.
+    unsafe {
+        if libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 {
+            return None;
+        }
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: as above.
+    unsafe {
+        if libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) != 0 {
+            return None;
+        }
+    }
+    buf.truncate(size);
+    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?) as usize;
+    let mut rest = &buf[4..];
+    let path_end = rest.iter().position(|&b| b == 0)?;
+    rest = &rest[path_end..];
+    let start = rest.iter().position(|&b| b != 0)?;
+    rest = &rest[start..];
+    let args: Vec<String> =
+        rest.split(|&b| b == 0).take(argc).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    (args.len() == argc && argc > 0).then_some(args)
+}
+
+#[cfg(target_os = "linux")]
+pub fn arguments(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let args: Vec<String> = raw
+        .split(|&b| b == 0)
+        .filter(|a| !a.is_empty())
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect();
+    (!args.is_empty()).then_some(args)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn arguments(_pid: u32) -> Option<Vec<String>> {
+    None
+}
+
+/// The full path of a process's program.
+#[cfg(target_os = "macos")]
+pub fn program_path(pid: u32) -> Option<String> {
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: the buffer is valid for its length.
+    let len = unsafe { libc::proc_pidpath(pid as libc::c_int, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (len > 0).then(|| String::from_utf8_lossy(&buf[..len as usize]).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+pub fn program_path(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok().and_then(|p| p.to_str().map(String::from))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn program_path(_pid: u32) -> Option<String> {
+    None
+}
+
 fn clock(unix_secs: u64) -> String {
     let t = unix_secs as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -134,6 +238,16 @@ mod tests {
         assert_eq!(base("-/bin/zsh"), "zsh");
         assert_eq!(base("-zsh"), "zsh");
         assert_eq!(base("/opt/homebrew/bin/claude"), "claude");
+    }
+
+    #[test]
+    fn a_process_arguments_and_path_are_read() {
+        let me = std::process::id();
+        let args = arguments(me).expect("own arguments");
+        let mine: Vec<String> = std::env::args().collect();
+        assert_eq!(args, mine);
+        let path = program_path(me).expect("own path");
+        assert_eq!(std::fs::canonicalize(path).unwrap(), std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap());
     }
 
     #[test]

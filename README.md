@@ -202,6 +202,43 @@ What this does not stop is in the [threat model](docs/threat-model.md#website-lo
 mainly, an agent that can run scripts in its own browser can read a password
 as it is typed, and once signed in the agent can act as you on that site.
 
+## AWS sign-ins
+
+Mayi can hold an AWS IAM Identity Center (SSO) sign-in, so agents get the
+temporary keys of one role and never the session that reaches all of them.
+
+In the app, Secrets → Add → AWS Sign-In. Mayi suggests the portals your AWS
+CLI already knows; pick one and your browser opens AWS's own sign-in, with
+your usual login and two-factor. Allow "Mayi", then choose which roles agents
+may use, each as a profile with its own level: read-only roles at 1, roles
+that can change production at 4, the others at 3, as suggested. Mayi then
+removes the sign-in the AWS CLI saved in a plain file, which any program
+could read, and adds the profiles to `~/.aws/config`.
+
+```sh
+aws s3 ls --profile mawaqit-production-ro          # level 1: answers at once
+aws s3 rm s3://… --profile mawaqit-production-admin  # level 4: Touch ID, showing this command
+mayi run --aws mawaqit/production-ro -r "List the buckets" -- aws s3 ls
+```
+
+The profiles run `mayi aws credentials` for each command (AWS's
+`credential_process`), so the AWS CLI, Terraform and the SDKs work as before.
+The prompt shows the AWS command that asked. On another machine, `mayi aws
+setup` writes the same profiles; nothing is stored there.
+
+- The sign-in is refreshed silently, as the AWS CLI does, until AWS ends the
+  session (8 hours by default). The next request then asks you to sign in
+  again, and carries on once you have.
+- Level 4 on a profile means Touch ID, your Apple Watch or your password for
+  every use. It is a check, not encryption: one sign-in serves all its roles,
+  so it cannot be encrypted for one of them.
+- Adding a profile, or lowering one's level, asks for Touch ID, even with
+  Mayi's window unlocked.
+- A command you approve can keep its role's keys until they expire (1 to 12
+  hours, set by your AWS administrators).
+
+More in the [threat model](docs/threat-model.md#aws-sign-ins).
+
 ## Other machines
 
 A server or VM can ask a vault device for secrets without storing any.
@@ -286,7 +323,7 @@ Give the agent `skill/mayi/SKILL.md` (for Claude Code, copy the `skill/mayi`
 folder into `~/.claude/skills/`; it is also in the app, under
 `Mayi.app/Contents/Resources/skill`). It teaches the `mayi run` syntax and the
 rules: narrow requests, readable commands, never extract a value, a denial is
-final. Agents use Mayi through their shell; there is no MCP server, as it
+final, and AWS through profiles rather than `aws sso login`. Agents use Mayi through their shell; there is no MCP server, as it
 would hand apps without a shell a way to run commands on your Mac.
 
 ## If something is lost

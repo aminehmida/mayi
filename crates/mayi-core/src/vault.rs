@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 
 use crate::crypto::{self, Key};
 use crate::hardware::HardwareKeys;
-use crate::model::{Destination, ItemMeta, Level, NewItem, RotateNote, SecretValues, Source};
+use crate::model::{AwsProfile, AwsSignIn, Destination, ItemMeta, Level, NewItem, RotateNote, SecretValues, Source};
 use crate::provider::{self, NEEDS_NEWER};
 use crate::{now_ms, Error, Result};
 
@@ -255,6 +255,7 @@ fn payload_aad(meta: &ItemMeta) -> Result<Vec<u8>> {
     match (&meta.destination, &meta.source) {
         (Destination::Command, Source::Stored) => Ok(format!("mayi/payload/{id}/{level}").into_bytes()),
         (Destination::Website, Source::Stored) => Ok(format!("mayi/payload/{id}/{level}/login").into_bytes()),
+        (Destination::Command, Source::AwsSso) => Ok(format!("mayi/payload/{id}/{level}/aws_sso").into_bytes()),
         _ => Err(Error::Vault(format!("{}: {NEEDS_NEWER}", meta.name))),
     }
 }
@@ -503,7 +504,9 @@ impl Vault {
     }
 
     /// Creates the secret, or replaces the one with the same name. The
-    /// previous version is kept in history.
+    /// previous version is kept in history. Replacing it with a lower level,
+    /// or a login with a secret for commands, asks for the owner's
+    /// fingerprint first (see [`Vault::confirm_presence`]).
     ///
     /// Needs only public keys, so writing a level 4 secret asks for no
     /// biometric check.
@@ -513,27 +516,25 @@ impl Vault {
             return Err(Error::Vault("a secret needs at least one field".into()));
         }
         let sites = check_rules(&new.destination, &new.allow, &new.sites)?;
-        provider::find(&new.destination, &Source::Stored)
+        provider::stored(&new.destination)
             .and_then(|p| p.check(&mut new.values))
             .map_err(Error::Vault)?;
         let existing = self.list()?.into_iter().find(|m| m.name == new.name);
-        let id = existing.as_ref().map(|m| m.id.clone()).unwrap_or_else(crypto::random_id);
-        let dk = crypto::random_key();
-        // Level 4: one wrap per device, to its biometric key.
-        let wraps: Vec<(String, Vec<u8>)> = if new.level == Level::Biometric {
-            self.devices()?
-                .into_iter()
-                .filter(|d| !d.removed)
-                .map(|d| Ok((d.id, crypto::ecies_seal(&unhex(&d.biometric_pub)?, &wrap_aad(&id), &*dk)?)))
-                .collect::<Result<_>>()?
-        } else {
-            vec![(VAULT_RECIPIENT.to_string(), crypto::seal(&self.vk, &wrap_aad(&id), &*dk))]
-        };
-
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
+        if let Some(old) = &existing {
+            match &old.source {
+                Source::Stored => {}
+                Source::AwsSso => {
+                    return Err(Error::Vault(format!("{} is an AWS sign-in: remove it first to reuse its name", old.name)))
+                }
+                Source::Other(_) => return Err(Error::Vault(format!("{}: {NEEDS_NEWER}", old.name))),
+            }
+            let to_commands = old.destination == Destination::Website && new.destination == Destination::Command;
+            if new.level < old.level || to_commands {
+                self.confirm_presence(&format!("Lower the protection of {}", old.name))?;
+            }
+        }
         let meta = ItemMeta {
-            id: id.clone(),
+            id: existing.as_ref().map(|m| m.id.clone()).unwrap_or_else(crypto::random_id),
             name: new.name,
             level: new.level,
             allow: new.allow,
@@ -545,16 +546,35 @@ impl Vault {
             folder: clean_folder(new.folder),
             // A new value: whoever saw the old one no longer matters.
             rotate: Vec::new(),
+            aws: None,
             unknown_fields: BTreeMap::new(),
-            version: next_version(&tx)?,
+            version: 0,
         };
-        let payload = crypto::seal(
-            &dk,
-            &payload_aad(&meta)?,
-            &zeroize::Zeroizing::new(serde_json::to_vec(&new.values)?),
-        );
+        self.write_item(meta, &new.values, true)
+    }
+
+    /// Seals `values` under a new data key and stores them with `meta` as a
+    /// new version, keeping the previous one in history if `archive`.
+    fn write_item(&self, mut meta: ItemMeta, values: &SecretValues, archive: bool) -> Result<ItemMeta> {
+        let id = meta.id.clone();
+        let dk = crypto::random_key();
+        // Level 4: one wrap per device, to its biometric key.
+        let wraps: Vec<(String, Vec<u8>)> = if meta.level == Level::Biometric {
+            self.devices()?
+                .into_iter()
+                .filter(|d| !d.removed)
+                .map(|d| Ok((d.id, crypto::ecies_seal(&unhex(&d.biometric_pub)?, &wrap_aad(&id), &*dk)?)))
+                .collect::<Result<_>>()?
+        } else {
+            vec![(VAULT_RECIPIENT.to_string(), crypto::seal(&self.vk, &wrap_aad(&id), &*dk))]
+        };
+
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        meta.version = next_version(&tx)?;
+        let payload = crypto::seal(&dk, &payload_aad(&meta)?, &zeroize::Zeroizing::new(serde_json::to_vec(values)?));
         let sealed_meta = crypto::seal(&self.vk, &meta_aad(&id), &serde_json::to_vec(&meta)?);
-        if existing.is_some() {
+        if archive {
             Self::archive(&tx, &id)?;
         }
         tx.execute("DELETE FROM wraps WHERE item_id = ?1", [&id])?;
@@ -573,10 +593,107 @@ impl Vault {
         Ok(meta)
     }
 
+    /// Asks for the owner's fingerprint (Touch ID, Apple Watch or password
+    /// on a Mac) through this device's level 4 key, showing `prompt`. Opens
+    /// nothing: it proves the owner is there, in a way no program can fake.
+    pub fn confirm_presence(&self, prompt: &str) -> Result<()> {
+        let id = format!("presence-{}", crypto::random_id());
+        let challenge = crypto::random_key();
+        let public = crypto::normalize_public(&self.hw.biometric_public())?;
+        let wrapped = crypto::ecies_seal(&public, &wrap_aad(&id), &*challenge)?;
+        let opened = self.unwrap_biometric(&[&id], &[&wrapped], prompt)?;
+        match opened.first() {
+            Some(o) if o.as_slice() == &challenge[..] => Ok(()),
+            _ => Err(Error::BiometricDenied),
+        }
+    }
+
+    // --- AWS sign-ins ----------------------------------------------------
+
+    fn aws_meta(&self, name: &str) -> Result<ItemMeta> {
+        let meta = self.meta(name)?;
+        match (&meta.source, &meta.aws) {
+            (Source::AwsSso, Some(_)) => Ok(meta),
+            _ => Err(Error::Vault(format!("{name} is not an AWS sign-in"))),
+        }
+    }
+
+    /// Saves a new AWS sign-in: the session (`aws::Session::values`) as its
+    /// values, the portal and profiles in its metadata. The sign-in itself
+    /// is stored like a level 1 to 3 secret; each profile has its own level.
+    pub fn put_aws(&self, name: &str, aws: AwsSignIn, values: SecretValues, folder: Option<String>) -> Result<ItemMeta> {
+        validate_name(name)?;
+        crate::aws::check_profiles(&aws.profiles).map_err(Error::Vault)?;
+        crate::aws::Session::from_values(&values).map_err(Error::Vault)?;
+        if self.list()?.iter().any(|m| m.name == name) {
+            return Err(Error::Vault(format!("a secret called {name} already exists")));
+        }
+        let meta = ItemMeta {
+            id: crypto::random_id(),
+            name: name.to_string(),
+            level: Level::Log,
+            allow: vec![],
+            max_grant_secs: 3600,
+            fields: crate::aws::FIELDS.iter().map(|f| f.to_string()).collect(),
+            destination: Destination::Command,
+            source: Source::AwsSso,
+            sites: vec![],
+            folder: clean_folder(folder),
+            rotate: vec![],
+            aws: Some(aws),
+            unknown_fields: BTreeMap::new(),
+            version: 0,
+        };
+        self.write_item(meta, &values, false)
+    }
+
+    /// Replaces the session of an AWS sign-in after signing in again,
+    /// keeping its profiles.
+    pub fn renew_aws(&self, name: &str, values: SecretValues) -> Result<ItemMeta> {
+        let meta = self.aws_meta(name)?;
+        let session = crate::aws::Session::from_values(&values).map_err(Error::Vault)?;
+        if meta.aws.as_ref().is_some_and(|a| a.start_url != session.start_url) {
+            return Err(Error::Vault(format!("that sign-in was to {}, not {name}'s portal", session.start_url)));
+        }
+        self.write_item(meta, &values, false)
+    }
+
+    /// Changes the profiles of an AWS sign-in. Adding a profile, or lowering
+    /// one's level, asks for the owner's fingerprint first: in a window left
+    /// unlocked, an agent driving the screen could otherwise do it.
+    pub fn update_aws_profiles(&self, name: &str, profiles: Vec<AwsProfile>) -> Result<ItemMeta> {
+        let mut meta = self.aws_meta(name)?;
+        crate::aws::check_profiles(&profiles).map_err(Error::Vault)?;
+        let aws = meta.aws.as_mut().expect("checked above");
+        let loosened = profiles.iter().any(|p| {
+            match aws.profiles.iter().find(|o| o.account_id == p.account_id && o.role == p.role) {
+                Some(old) => p.level < old.level,
+                None => true,
+            }
+        });
+        if loosened {
+            self.confirm_presence(&format!("Lower the protection of {name}'s AWS profiles"))?;
+        }
+        aws.profiles = profiles;
+        self.write_meta(meta)
+    }
+
+    /// Keeps the new session of an AWS sign-in whose refresh token AWS
+    /// replaced. No history entry: it is the same sign-in.
+    pub(crate) fn store_values(&self, meta: &ItemMeta, values: &SecretValues) -> Result<ItemMeta> {
+        let current = self.aws_meta(&meta.name)?;
+        if current.id != meta.id {
+            return Err(Error::Vault(format!("{} changed meanwhile", meta.name)));
+        }
+        self.write_item(current, values, false)
+    }
+
     /// Changes the allowlist, grant cap and websites of a secret without
     /// touching its values, so it needs no biometric check even at level 4.
     /// The level and destination cannot change this way: the values are
     /// bound to them. A secret this version cannot use cannot be changed.
+    /// A change that asks less (a new expected command or website, a longer
+    /// grant) needs the owner's fingerprint first.
     pub fn update_rules(
         &self,
         name: &str,
@@ -586,8 +703,18 @@ impl Vault {
         folder: Option<String>,
     ) -> Result<ItemMeta> {
         let mut meta = self.meta(name)?;
-        provider::of(&meta).map_err(Error::Vault)?;
-        meta.sites = check_rules(&meta.destination, &allow, &sites)?;
+        provider::check_known(&meta).map_err(Error::Vault)?;
+        if meta.source == Source::AwsSso && !allow.is_empty() {
+            return Err(Error::Vault(format!("{name}'s profiles have their own levels: it takes no expected commands")));
+        }
+        let sites = check_rules(&meta.destination, &allow, &sites)?;
+        let loosened = allow.iter().any(|p| !meta.allow.contains(p))
+            || sites.iter().any(|s| !meta.sites.contains(s))
+            || max_grant_secs > meta.max_grant_secs;
+        if loosened {
+            self.confirm_presence(&format!("Lower the protection of {name}"))?;
+        }
+        meta.sites = sites;
         meta.allow = allow;
         meta.max_grant_secs = max_grant_secs;
         meta.folder = clean_folder(folder);
@@ -656,7 +783,7 @@ impl Vault {
 
         // Before any biometric check: this version could not open them.
         for meta in items {
-            provider::of(meta).map_err(Error::Vault)?;
+            provider::check_known(meta).map_err(Error::Vault)?;
         }
 
         let sealed: Vec<Sealed> = {
@@ -1491,7 +1618,7 @@ mod tests {
         });
         let vault = Vault::create(&dir.path().join("v.db"), Arc::new(keys), "test").unwrap();
         from_a_newer_version(&vault, "FILE", |m| m.destination = Destination::Other("file".into()));
-        from_a_newer_version(&vault, "AWS", |m| m.source = Source::Other("aws_sso".into()));
+        from_a_newer_version(&vault, "AWS", |m| m.source = Source::Other("gcloud".into()));
 
         for name in ["FILE", "AWS"] {
             let meta = vault.meta(name).unwrap();
@@ -1509,6 +1636,103 @@ mod tests {
             assert_eq!(flagged.unknown_fields.get("targets"), Some(&serde_json::json!(["ReadOnly"])));
         }
         assert_eq!(asked.load(Ordering::SeqCst), 0, "refused before any fingerprint");
+    }
+
+    fn counting_vault(dir: &tempfile::TempDir, ok: bool) -> (Vault, Arc<AtomicUsize>) {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        let keys = SoftwareKeys::generate(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            ok
+        });
+        (Vault::create(&dir.path().join("v.db"), Arc::new(keys), "test").unwrap(), asked)
+    }
+
+    #[test]
+    fn asking_less_needs_the_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, asked) = counting_vault(&dir, true);
+        let count = || asked.load(Ordering::SeqCst);
+        vault.put(item("TOKEN", Level::Approve, "a")).unwrap();
+        vault.put(item("TOKEN", Level::Biometric, "b")).unwrap();
+        assert_eq!(count(), 0, "new, and raised: nothing asked");
+        vault.put(item("TOKEN", Level::Notify, "c")).unwrap();
+        assert_eq!(count(), 1, "lowered");
+        vault.update_rules("TOKEN", vec!["make *".into()], 600, vec![], None).unwrap();
+        assert_eq!(count(), 2, "an expected command added");
+        vault.update_rules("TOKEN", vec![], 60, vec![], Some("Work".into())).unwrap();
+        assert_eq!(count(), 2, "removing and moving ask nothing");
+        vault.update_rules("TOKEN", vec![], 3600, vec![], None).unwrap();
+        assert_eq!(count(), 3, "a longer grant");
+
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _) = counting_vault(&dir, false);
+        vault.put(item("TOKEN", Level::Approve, "a")).unwrap();
+        assert!(vault.put(item("TOKEN", Level::Log, "b")).is_err());
+        let meta = vault.meta("TOKEN").unwrap();
+        assert_eq!(meta.level, Level::Approve, "unchanged when refused");
+        assert_eq!(&**vault.reveal(&[&meta], "").unwrap()[0].get("value").unwrap(), "a");
+        assert!(vault.update_rules("TOKEN", vec!["*".into()], 600, vec![], None).is_err());
+    }
+
+    fn aws_sign_in(vault: &Vault) -> ItemMeta {
+        use crate::aws::{fake::FakeAws, suggest_profiles, SignIn};
+        let api = FakeAws::default();
+        let session = SignIn::start(&api, "https://mawaqit.awsapps.com/start", "eu-west-3")
+            .unwrap()
+            .wait(&api, &AtomicBool::new(false))
+            .unwrap();
+        let profiles = suggest_profiles(&session.accounts(&api).unwrap());
+        let aws = AwsSignIn { start_url: session.start_url.clone(), region: "eu-west-3".into(), profiles };
+        vault.put_aws("mawaqit", aws, session.values(), None).unwrap()
+    }
+
+    #[test]
+    fn aws_profiles_are_loosened_only_with_the_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, asked) = counting_vault(&dir, true);
+        let count = || asked.load(Ordering::SeqCst);
+        let meta = aws_sign_in(&vault);
+        assert_eq!(meta.source, Source::AwsSso);
+        assert!(vault.reveal(&[&meta], "").unwrap()[0].contains_key("refresh_token"));
+        let mut profiles = meta.aws.clone().unwrap().profiles;
+
+        profiles[0].level = Level::Biometric;
+        profiles[1].name = "prod-admin".into();
+        vault.update_aws_profiles("mawaqit", profiles.clone()).unwrap();
+        assert_eq!(count(), 0, "raised and renamed");
+        profiles[0].level = Level::Log;
+        vault.update_aws_profiles("mawaqit", profiles.clone()).unwrap();
+        assert_eq!(count(), 1, "lowered");
+        let removed: Vec<AwsProfile> = profiles[1..].to_vec();
+        vault.update_aws_profiles("mawaqit", removed).unwrap();
+        assert_eq!(count(), 1, "removed");
+        vault.update_aws_profiles("mawaqit", profiles.clone()).unwrap();
+        assert_eq!(count(), 2, "added back");
+
+        // Not a plain secret, and not to be turned into one.
+        assert!(vault.put(item("mawaqit", Level::Log, "x")).is_err());
+        assert!(vault.update_rules("mawaqit", vec!["aws *".into()], 600, vec![], None).is_err());
+        assert!(vault.update_aws_profiles("TOKEN", vec![]).is_err());
+        let mut bad = profiles.clone();
+        bad[0].name = bad[1].name.clone();
+        assert!(vault.update_aws_profiles("mawaqit", bad).is_err());
+
+        // Signing in again keeps the profiles; another portal is refused.
+        let fresh = vault.reveal(&[&vault.meta("mawaqit").unwrap()], "").unwrap().remove(0);
+        let renewed = vault.renew_aws("mawaqit", fresh.clone()).unwrap();
+        assert_eq!(renewed.aws.unwrap().profiles, profiles);
+        let mut other = fresh;
+        other.insert("start_url".into(), Zeroizing::new("https://other.awsapps.com/start".into()));
+        assert!(vault.renew_aws("mawaqit", other).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _) = counting_vault(&dir, false);
+        let meta = aws_sign_in(&vault);
+        let mut profiles = meta.aws.unwrap().profiles;
+        profiles[0].level = Level::Log;
+        profiles[1].level = Level::Log;
+        assert!(vault.update_aws_profiles("mawaqit", profiles).is_err());
     }
 
     #[test]

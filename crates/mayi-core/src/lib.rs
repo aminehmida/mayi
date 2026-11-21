@@ -1,5 +1,6 @@
 //! Vault, policy and broker logic shared by every Mayi vault device.
 
+pub mod aws;
 pub mod broker;
 pub mod crypto;
 pub mod error;

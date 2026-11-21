@@ -61,6 +61,13 @@ public final class AppModel: ObservableObject {
         let complete: (ApprovalChoice) -> Void
     }
 
+    /// A request waiting while the owner signs in to AWS again.
+    public struct PendingSignIn: Identifiable {
+        public let id: UUID
+        public let needed: AwsSignInNeededInfo
+        let complete: (Bool) -> Void
+    }
+
     public struct ActiveNotice: Identifiable {
         public var id: UInt64 { notice.runId }
         public let notice: NoticeInfo
@@ -70,6 +77,11 @@ public final class AppModel: ObservableObject {
     }
 
     @Published public private(set) var pending: [PendingApproval] = []
+    @Published public private(set) var pendingSignIns: [PendingSignIn] = []
+    /// Whether Mayi keeps an AWS CLI profile for each AWS profile in
+    /// ~/.aws/config, so `aws --profile`, Terraform and SDKs ask Mayi.
+    @Published public private(set) var awsCliProfiles: Bool =
+        UserDefaults.standard.object(forKey: "awsCliProfiles") as? Bool ?? true
     @Published public private(set) var notices: [ActiveNotice] = []
     @Published public private(set) var secrets: [SecretRecord] = []
     @Published public private(set) var log: [AuditRecord] = []
@@ -450,9 +462,27 @@ public final class AppModel: ObservableObject {
 
     /// The requester went away: take its prompt down.
     func withdraw(runId: UInt64) {
+        if let index = pendingSignIns.firstIndex(where: { $0.needed.runId == runId }) {
+            pendingSignIns.remove(at: index).complete(false)
+        }
         guard let index = pending.firstIndex(where: { $0.prompt.runId == runId }) else { return }
         pending.remove(at: index).complete(.deny)
         refreshLogSoon()
+    }
+
+    func enqueueSignIn(id: UUID, needed: AwsSignInNeededInfo, complete: @escaping (Bool) -> Void) {
+        pendingSignIns.append(PendingSignIn(id: id, needed: needed, complete: complete))
+    }
+
+    /// The owner signed in again (or gave up) for a waiting request.
+    public func answerSignIn(_ id: UUID, signedIn: Bool) {
+        guard let index = pendingSignIns.firstIndex(where: { $0.id == id }) else { return }
+        pendingSignIns.remove(at: index).complete(signedIn)
+        refreshLogSoon()
+    }
+
+    func expireSignIn(_ id: UUID) {
+        pendingSignIns.removeAll { $0.id == id }
     }
 
     // MARK: Notices
@@ -516,6 +546,31 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Saves an edit from the secret editor. Off the main thread: lowering a
+    /// level, or adding an expected command or website, asks for Touch ID.
+    public func save(_ change: SecretDraft.Change) async -> String? {
+        guard let device else { return "The vault is not open." }
+        let problem = await Task.detached { () -> String? in
+            do {
+                switch change {
+                case .put(let name, let level, let values, let allow, let maxGrantSecs, let login, let sites, let folder):
+                    _ = try device.putSecret(
+                        name: name, level: level, values: values, allow: allow, maxGrantSecs: maxGrantSecs,
+                        login: login, sites: sites, folder: folder)
+                case .rules(let name, let allow, let maxGrantSecs, let sites, let folder):
+                    _ = try device.updateRules(
+                        name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites, folder: folder)
+                }
+                return nil
+            } catch {
+                return describe(error)
+            }
+        }.value
+        refresh()
+        if problem == nil { syncNow() }
+        return problem
+    }
+
     /// A secret's values for its owner to see, after Touch ID or the login
     /// password; for a level 4 secret, the check that unlocks it does that.
     /// Logged in Activity.
@@ -566,6 +621,135 @@ public final class AppModel: ObservableObject {
         } catch {
             return describe(error)
         }
+    }
+
+    // MARK: AWS sign-ins
+
+    /// Portals the AWS CLI on this Mac already knows, to suggest.
+    public func knownAwsPortals() -> [AwsPortalRecord] { awsKnownPortals() }
+
+    nonisolated private static func failure(_ error: Error) -> DraftError { DraftError(stringLiteral: describe(error)) }
+
+    /// Starts signing in to an AWS portal: register with AWS, then the owner
+    /// approves in the browser (`AwsSignInFlow.verificationUrl`).
+    public func beginAwsSignIn(startUrl: String, region: String) async -> Result<AwsSignInFlow, DraftError> {
+        await Task.detached { () -> Result<AwsSignInFlow, DraftError> in
+            do { return .success(try AwsSignInFlow.start(startUrl: startUrl, region: region)) } catch {
+                return .failure(Self.failure(error))
+            }
+        }.value
+    }
+
+    /// Waits for the owner to allow the sign-in in the browser.
+    public func finishAwsSignIn(_ flow: AwsSignInFlow) async -> Result<AwsSession, DraftError> {
+        await Task.detached { () -> Result<AwsSession, DraftError> in
+            do { return .success(try flow.wait()) } catch { return .failure(Self.failure(error)) }
+        }.value
+    }
+
+    /// The accounts and roles a new sign-in reaches.
+    public func awsAccounts(_ session: AwsSession) async -> Result<[AwsAccountRecord], DraftError> {
+        await Task.detached { () -> Result<[AwsAccountRecord], DraftError> in
+            do { return .success(try session.accounts()) } catch { return .failure(Self.failure(error)) }
+        }.value
+    }
+
+    /// The accounts and roles a saved sign-in reaches, to add profiles.
+    public func awsAccounts(name: String) async -> Result<[AwsAccountRecord], DraftError> {
+        guard let device else { return .failure("The vault is not open.") }
+        return await Task.detached { () -> Result<[AwsAccountRecord], DraftError> in
+            do { return .success(try device.awsAccounts(name: name)) } catch { return .failure(Self.failure(error)) }
+        }.value
+    }
+
+    /// Saves a new AWS sign-in. Then removes the AWS CLI's own saved
+    /// sign-in to the same portal, which any program could read, if asked.
+    public func saveAwsSignIn(
+        name: String, session: AwsSession, profiles: [AwsProfileRecord], folder: String?, forgetCliSignIns: Bool
+    ) async -> String? {
+        guard let device else { return "The vault is not open." }
+        let startUrl = session.startUrl()
+        let problem = await Task.detached { () -> String? in
+            do {
+                _ = try device.putAwsSignIn(name: name, session: session, profiles: profiles, folder: folder)
+                if forgetCliSignIns { _ = try? awsForgetCliSignIns(startUrl: startUrl) }
+                return nil
+            } catch {
+                return describe(error)
+            }
+        }.value
+        awsChanged(problem)
+        return problem
+    }
+
+    /// Changes a sign-in's profiles. Adding one or lowering a level asks for
+    /// Touch ID first, which is why this runs off the main thread.
+    public func updateAwsProfiles(name: String, profiles: [AwsProfileRecord]) async -> String? {
+        guard let device else { return "The vault is not open." }
+        let problem = await Task.detached { () -> String? in
+            do {
+                _ = try device.updateAwsProfiles(name: name, profiles: profiles)
+                return nil
+            } catch {
+                return describe(error)
+            }
+        }.value
+        awsChanged(problem)
+        return problem
+    }
+
+    /// Keeps the new session after signing in to a saved sign-in again.
+    public func renewAwsSignIn(name: String, session: AwsSession) async -> String? {
+        guard let device else { return "The vault is not open." }
+        let problem = await Task.detached { () -> String? in
+            do {
+                _ = try device.renewAwsSignIn(name: name, session: session)
+                return nil
+            } catch {
+                return describe(error)
+            }
+        }.value
+        awsChanged(problem)
+        return problem
+    }
+
+    /// Removes the AWS CLI's saved sign-in to a portal from this Mac.
+    public func forgetAwsCliSignIns(startUrl: String) -> String? {
+        do {
+            _ = try awsForgetCliSignIns(startUrl: startUrl)
+            refresh()
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    public func setAwsCliProfiles(_ on: Bool) {
+        awsCliProfiles = on
+        UserDefaults.standard.set(on, forKey: "awsCliProfiles")
+        writeAwsCliProfiles()
+    }
+
+    private func awsChanged(_ problem: String?) {
+        refresh()
+        guard problem == nil else { return }
+        syncNow()
+        writeAwsCliProfiles()
+    }
+
+    /// The `mayi` the AWS CLI profiles run: the one inside this app, whose
+    /// path survives updates.
+    private var mayiPath: String {
+        Bundle.main.url(forResource: "mayi", withExtension: nil)?.path ?? "/opt/homebrew/bin/mayi"
+    }
+
+    /// Keeps ~/.aws/config in step with the AWS profiles, when the owner
+    /// wants that, and removes Mayi's part when not.
+    private func writeAwsCliProfiles() {
+        guard let device, secrets.contains(where: { $0.aws != nil }) || !awsCliProfiles else { return }
+        let path = mayiPath
+        let include = awsCliProfiles
+        Task.detached { _ = try? device.writeAwsCliProfiles(mayiPath: path, include: include) }
     }
 
     /// The folders in use, sorted.
@@ -649,6 +833,32 @@ final class UiBridge: UiDelegate, @unchecked Sendable {
 
     /// A Mac does not sleep mid-request the way a phone does.
     func incoming() {}
+
+    /// Shows "sign in to AWS again" with the request, and waits while the
+    /// owner does it (or gives up).
+    func signInNeeded(needed: AwsSignInNeededInfo) -> Bool {
+        let id = UUID()
+        let done = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var signedIn = false
+        DispatchQueue.main.async { [model] in
+            MainActor.assumeIsolated {
+                guard let model else {
+                    done.signal()
+                    return
+                }
+                model.enqueueSignIn(id: id, needed: needed) { answer in
+                    lock.withLock { signedIn = answer }
+                    done.signal()
+                }
+            }
+        }
+        if done.wait(timeout: .now() + approvalTimeout) == .timedOut {
+            DispatchQueue.main.async { [model] in MainActor.assumeIsolated { model?.expireSignIn(id) } }
+            return false
+        }
+        return lock.withLock { signedIn }
+    }
 }
 
 /// Whether someone is at this Mac: the screen is unlocked and there was

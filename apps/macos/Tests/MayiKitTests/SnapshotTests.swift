@@ -51,7 +51,7 @@ import Testing
             dark: false)
         let stored = SecretRecord(
             name: "github", level: 3, fields: ["password", "totp", "username"], allow: [], maxGrantSecs: 600,
-            version: 1, login: true, sites: ["github.com"], copies: 2, folder: nil, rotate: [])
+            version: 1, login: true, sites: ["github.com"], copies: 2, folder: nil, rotate: [], aws: nil)
         var shown = SecretDraft(editing: stored)
         shown.show(RevealedSecret(fields: [
             RevealedField(name: "password", value: "correct horse"), RevealedField(name: "totp", value: "JBSWY3DPEHPK3PXP"),
@@ -66,7 +66,7 @@ import Testing
         let flagged = SecretRecord(
             name: "GITHUB_TOKEN", level: 3, fields: ["value"], allow: ["gh *"], maxGrantSecs: 900, version: 3,
             login: false, sites: [], copies: 2, folder: "Work",
-            rotate: [RotateNoteRecord(who: "Mac mini (test)", why: "revoked", atMs: UInt64(Date().timeIntervalSince1970 * 1000))])
+            rotate: [RotateNoteRecord(who: "Mac mini (test)", why: "revoked", atMs: UInt64(Date().timeIntervalSince1970 * 1000))], aws: nil)
         try await snapshot(SecretRow(secret: flagged).frame(width: 520).padding(), name: "row-rotate", dark: false)
         try await snapshot(
             SecretEditor(
@@ -89,7 +89,7 @@ import Testing
     @Test func editor() async throws {
         let stored = SecretRecord(
             name: "PROD_DB", level: 4, fields: ["password", "user"], allow: ["psql *", "pg_dump *"],
-            maxGrantSecs: 300, version: 2, login: false, sites: [], copies: 1, folder: nil, rotate: [])
+            maxGrantSecs: 300, version: 2, login: false, sites: [], copies: 1, folder: nil, rotate: [], aws: nil)
         try await snapshot(
             SecretEditor(
                 existing: stored, error: "Changing the level re-encrypts the secret, so enter its values again.",
@@ -151,7 +151,7 @@ import Testing
         defer { window.close() }
         try await eventually { (window.toolbar?.items.count ?? 0) > 0 }
         let labels = window.toolbar?.items.map(\.label) ?? []
-        #expect(labels.contains("Add Secret"), "toolbar items: \(labels)")
+        #expect(labels.contains("Add"), "toolbar items: \(labels)")
     }
 
     @Test func recoveryKey() async throws {

@@ -3,6 +3,7 @@
 //! Frames are a 4-byte big-endian length followed by JSON. The same messages
 //! travel over the local unix socket and inside a Noise tunnel (see [`noise`]).
 
+pub mod awscli;
 pub mod noise;
 pub mod program;
 pub mod site;
@@ -141,6 +142,29 @@ pub struct SecretInfo {
     pub login: bool,
     #[serde(default)]
     pub sites: Vec<String>,
+    /// For an AWS sign-in: its portal and the profiles a request can name,
+    /// each with its own level (`mayi run --aws NAME/PROFILE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<AwsInfo>,
+}
+
+/// What a requester may know about an AWS sign-in: never its session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwsInfo {
+    pub start_url: String,
+    pub region: String,
+    pub profiles: Vec<ProfileInfo>,
+}
+
+/// One profile of an AWS sign-in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileInfo {
+    pub name: String,
+    pub level: u8,
+    pub account_id: String,
+    #[serde(default)]
+    pub account_name: String,
+    pub role: String,
 }
 
 pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> io::Result<()> {

@@ -1,7 +1,7 @@
 # Providers: beyond stored secrets
 
-> A plan. Step 1 is built; the rest is not. Where the code differs, the code
-> is right.
+> A plan. Steps 1 and 2 are built (step 2 without IAM keys); the rest is
+> not. Where the code differs, the code is right.
 
 Mayi releases values it stores. Some credentials cannot work that way: an
 AWS SSO token is rewritten by the AWS CLI as it refreshes, and anything a
@@ -44,7 +44,10 @@ A provider can:
    such as an AWS read-only role at level 1 and an admin role at level 4.
 
 Step 1 built the `Provider` trait with check and release, for stored values
-and logins. Sign-in, refresh, expiry and targets come with AWS SSO.
+and logins. Step 2 added AWS SSO (`aws.rs`): its provider keeps state, so
+the broker owns it; release can return new state to store, or say the owner
+must sign in again. Its sign-in steps and targets (profiles) are specific to
+AWS for now; a generic description comes with a second such provider.
 
 Planned: AWS SSO and AWS IAM keys (step 2), RDS IAM database passwords
 (step 4), then gcloud, Azure, kubectl OIDC, GitHub App and OAuth refresh
@@ -63,6 +66,12 @@ tokens (step 6).
 ## How the main flows work
 
 ### AWS SSO
+
+Built as below, with two changes from the plan: a profile at level 4 asks for
+the fingerprint (the session is shared by all roles, so it cannot be
+encrypted for one), and AWS tools ask through AWS CLI profiles whose
+`credential_process` is `mayi aws credentials`, so `aws --profile` and
+Terraform work unchanged. See the README and the threat model.
 
 Sign-in, once per portal session:
 
@@ -147,7 +156,7 @@ use every day.
 | Step | Ships | Tested with |
 |---|---|---|
 | 1 | Destination and provider split; providers become a Rust trait; the two-factor code moves into one. Older devices tolerate unknown destinations and providers. No visible change. | Existing tests, `scripts/test-fill.py`, daily use |
-| 2 | AWS SSO provider (sign-in on the device, a level per role); AWS IAM keys to 15-minute assumed-role keys | Real AWS accounts, with `~/.aws/sso/cache` deleted |
+| 2 | AWS SSO provider (sign-in on the device, a level per role). Built; IAM keys to 15-minute assumed-role keys moved to a later step | Real AWS accounts, with `~/.aws/sso/cache` deleted |
 | 3 | `mayi ssh-agent` with Secure Enclave keys on the Mac | `ssh` to a server, `git push`, commit signing |
 | 4 | RDS IAM database passwords; the temporary file destination | `psql` against RDS; a tool that reads a config file |
 | 5 | Local proxy: token injection, then AWS re-signing | `curl` and Python, then the `aws` CLI with dummy keys |

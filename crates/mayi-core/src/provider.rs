@@ -2,9 +2,10 @@
 //!
 //! There is one for each [`Source`], compiled in rather than loaded: the
 //! vault device holds every key, so code that runs there ships with Mayi.
-//! Stored values are the only source so far. A login's go through their own
-//! provider, because its two-factor key is never released: the page gets
-//! the current code. See `docs/providers.md` for the ones planned.
+//! Stored values go out as saved; a login's go through their own provider,
+//! because its two-factor key is never released: the page gets the current
+//! code. An AWS sign-in's provider (`aws.rs`) keeps state and talks to AWS,
+//! so the broker owns it. See `docs/providers.md` for the ones planned.
 
 use mayi_proto::{FIELD_PASSWORD, FIELD_TOTP, FIELD_USERNAME};
 
@@ -14,32 +15,73 @@ use crate::totp::Totp;
 /// Why a device refuses a secret whose destination or source it does not know.
 pub const NEEDS_NEWER: &str = "it was made by a newer version of Mayi: update Mayi on this device to use it";
 
+/// What a provider is asked to release.
+pub struct Release<'a> {
+    pub meta: &'a ItemMeta,
+    pub stored: &'a SecretValues,
+    /// The fields asked for, as the request's bindings name them.
+    pub fields: &'a [&'a str],
+    /// Unix time in seconds.
+    pub now_secs: u64,
+}
+
+pub struct Released {
+    /// Every field asked for.
+    pub values: SecretValues,
+    /// New stored values to keep, when the provider's state changed (AWS
+    /// replaced a refresh token).
+    pub store: Option<SecretValues>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Failed(String),
+    /// The owner must sign in again (an AWS session ended).
+    SignInNeeded(String),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Failed(why) | Refusal::SignInNeeded(why) => f.write_str(why),
+        }
+    }
+}
+
 pub trait Provider: Sync {
     /// Checks, and tidies, values about to be stored.
     fn check(&self, values: &mut SecretValues) -> Result<(), String>;
 
-    /// The values to release for `fields`, made from the stored ones. Has
-    /// every field asked for, or fails. `now_secs` is Unix time in seconds.
-    fn release(&self, stored: &SecretValues, fields: &[&str], now_secs: u64) -> Result<SecretValues, String>;
+    /// The values to release, made from the stored ones.
+    fn release(&self, r: &Release) -> Result<Released, Refusal>;
 }
 
-/// The provider for a secret going to `destination` from `source`, or why
-/// this device cannot use it.
-pub fn find(destination: &Destination, source: &Source) -> Result<&'static dyn Provider, String> {
+/// Whether this version can use a secret going to `destination` from
+/// `source`.
+pub fn known(destination: &Destination, source: &Source) -> Result<(), String> {
     match (destination, source) {
-        (Destination::Command, Source::Stored) => Ok(&Stored),
-        (Destination::Website, Source::Stored) => Ok(&Login),
+        (Destination::Command, Source::Stored | Source::AwsSso) | (Destination::Website, Source::Stored) => Ok(()),
         _ => Err(NEEDS_NEWER.into()),
     }
 }
 
-/// [`find`] for an existing secret, with its name in the error.
-pub fn of(meta: &ItemMeta) -> Result<&'static dyn Provider, String> {
-    find(&meta.destination, &meta.source).map_err(|e| format!("{}: {e}", meta.name))
+/// [`known`] for an existing secret, with its name in the error.
+pub fn check_known(meta: &ItemMeta) -> Result<(), String> {
+    known(&meta.destination, &meta.source).map_err(|e| format!("{}: {e}", meta.name))
 }
 
-fn field<'a>(stored: &'a SecretValues, name: &str) -> Result<&'a zeroize::Zeroizing<String>, String> {
-    stored.get(name).ok_or_else(|| format!("no field {name}"))
+/// The provider for stored values going to `destination`. AWS sign-ins are
+/// released by the broker's own provider.
+pub fn stored(destination: &Destination) -> Result<&'static dyn Provider, String> {
+    match destination {
+        Destination::Command => Ok(&Stored),
+        Destination::Website => Ok(&Login),
+        Destination::Other(_) => Err(NEEDS_NEWER.into()),
+    }
+}
+
+fn field<'a>(stored: &'a SecretValues, name: &str) -> Result<&'a zeroize::Zeroizing<String>, Refusal> {
+    stored.get(name).ok_or_else(|| Refusal::Failed(format!("no field {name}")))
 }
 
 /// Values released as the owner saved them.
@@ -50,8 +92,9 @@ impl Provider for Stored {
         Ok(())
     }
 
-    fn release(&self, stored: &SecretValues, fields: &[&str], _now_secs: u64) -> Result<SecretValues, String> {
-        fields.iter().map(|&f| Ok((f.to_string(), field(stored, f)?.clone()))).collect()
+    fn release(&self, r: &Release) -> Result<Released, Refusal> {
+        let values = r.fields.iter().map(|&f| Ok((f.to_string(), field(r.stored, f)?.clone()))).collect::<Result<_, _>>()?;
+        Ok(Released { values, store: None })
     }
 }
 
@@ -77,21 +120,28 @@ impl Provider for Login {
         Ok(())
     }
 
-    fn release(&self, stored: &SecretValues, fields: &[&str], now_secs: u64) -> Result<SecretValues, String> {
-        fields
+    fn release(&self, r: &Release) -> Result<Released, Refusal> {
+        let values = r
+            .fields
             .iter()
             .map(|&f| {
-                let value = field(stored, f)?;
-                let value = if f == FIELD_TOTP { Totp::parse(value)?.code(now_secs) } else { value.clone() };
+                let value = field(r.stored, f)?;
+                let value = if f == FIELD_TOTP {
+                    Totp::parse(value).map_err(Refusal::Failed)?.code(r.now_secs)
+                } else {
+                    value.clone()
+                };
                 Ok((f.to_string(), value))
             })
-            .collect()
+            .collect::<Result<_, Refusal>>()?;
+        Ok(Released { values, store: None })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Level;
     use zeroize::Zeroizing;
 
     const KEY: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -100,36 +150,65 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), Zeroizing::new(v.to_string()))).collect()
     }
 
+    fn meta() -> ItemMeta {
+        ItemMeta {
+            id: "i".into(),
+            name: "x".into(),
+            level: Level::Log,
+            allow: vec![],
+            max_grant_secs: 0,
+            fields: vec![],
+            destination: Destination::Command,
+            source: Source::Stored,
+            sites: vec![],
+            folder: None,
+            rotate: vec![],
+            aws: None,
+            unknown_fields: Default::default(),
+            version: 1,
+        }
+    }
+
+    fn release(p: &dyn Provider, stored: &SecretValues, fields: &[&str]) -> Result<SecretValues, Refusal> {
+        p.release(&Release { meta: &meta(), stored, fields, now_secs: 59 }).map(|r| r.values)
+    }
+
     #[test]
-    fn each_known_pair_has_a_provider_and_others_none() {
-        assert!(find(&Destination::Command, &Source::Stored).is_ok());
-        assert!(find(&Destination::Website, &Source::Stored).is_ok());
+    fn known_pairs_and_others() {
+        for (destination, source) in [
+            (Destination::Command, Source::Stored),
+            (Destination::Website, Source::Stored),
+            (Destination::Command, Source::AwsSso),
+        ] {
+            assert!(known(&destination, &source).is_ok(), "{destination:?} {source:?}");
+        }
         let newer = [
             (Destination::Other("file".into()), Source::Stored),
-            (Destination::Command, Source::Other("aws_sso".into())),
-            (Destination::Website, Source::Other("aws_sso".into())),
+            (Destination::Command, Source::Other("gcloud".into())),
+            (Destination::Website, Source::AwsSso),
         ];
         for (destination, source) in newer {
-            assert_eq!(find(&destination, &source).err().as_deref(), Some(NEEDS_NEWER));
+            assert_eq!(known(&destination, &source).err().as_deref(), Some(NEEDS_NEWER));
         }
+        assert!(stored(&Destination::Other("file".into())).is_err());
     }
 
     #[test]
     fn stored_values_are_released_as_saved() {
         let stored = values(&[("user", "u"), ("password", "p"), ("totp", KEY)]);
-        let out = Stored.release(&stored, &["password", "totp"], 59).unwrap();
+        let out = release(&Stored, &stored, &["password", "totp"]).unwrap();
         assert_eq!(out, values(&[("password", "p"), ("totp", KEY)]), "only what was asked, a totp field untouched");
-        assert!(Stored.release(&stored, &["missing"], 59).is_err());
+        assert!(release(&Stored, &stored, &["missing"]).is_err());
     }
 
     #[test]
     fn a_login_releases_the_code_and_never_the_key() {
         let stored = values(&[("username", "amine"), ("password", "pw"), ("totp", KEY)]);
-        let out = Login.release(&stored, &["username", "password", "totp"], 59).unwrap();
+        let out = release(&Login, &stored, &["username", "password", "totp"]).unwrap();
         assert_eq!(&**out.get("username").unwrap(), "amine");
         assert_eq!(&**out.get("password").unwrap(), "pw");
         // The RFC 6238 test key's code at 59 seconds, to six digits.
         assert_eq!(&**out.get("totp").unwrap(), "287082");
-        assert!(Login.release(&stored, &["value"], 59).is_err());
+        assert!(release(&Login, &stored, &["value"]).is_err());
     }
 }

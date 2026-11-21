@@ -55,6 +55,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var mainWindow: NSWindow?
     private var approvalPanel: NSPanel?
+    private var signInPanel: NSPanel?
+    private var shownSignIn: UUID?
     private var shownApproval: UUID?
     private var noticePanel: NSPanel?
     private var welcomeWindow: NSWindow?
@@ -111,6 +113,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         model.$pending
             .receive(on: DispatchQueue.main)
             .sink { [weak self] pending in self?.showApproval(pending) }
+            .store(in: &subscriptions)
+        model.$pendingSignIns
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] pending in self?.showSignIn(pending) }
             .store(in: &subscriptions)
         model.$notices
             .receive(on: DispatchQueue.main)
@@ -350,6 +356,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.model.answer(first.id, choice)
         }
         let hosting = NSHostingView(rootView: view)
+        panel.contentView = hosting
+        panel.setContentSize(hosting.fittingSize)
+        panel.center()
+        panel.orderFrontRegardless()
+        NSSound.beep()
+    }
+
+    /// Shows the oldest request waiting for an AWS sign-in.
+    private func showSignIn(_ pending: [AppModel.PendingSignIn]) {
+        guard let first = pending.first else {
+            signInPanel?.orderOut(nil)
+            shownSignIn = nil
+            return
+        }
+        if shownSignIn == first.id { return }
+        shownSignIn = first.id
+        let panel = signInPanel ?? floatingPanel(titled: true)
+        signInPanel = panel
+        panel.title = "Mayi"
+        let hosting = NSHostingView(rootView: AwsSignInAgainView(model: model, pending: first, waiting: pending.count - 1))
         panel.contentView = hosting
         panel.setContentSize(hosting.fittingSize)
         panel.center()
