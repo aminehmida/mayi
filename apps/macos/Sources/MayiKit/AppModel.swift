@@ -183,6 +183,9 @@ public final class AppModel: ObservableObject {
         self.paths = paths
         socketPath = paths.socket
         refresh()
+        // The profiles in ~/.aws/config run the `mayi` inside this app: keep
+        // them pointing at the copy running now, after an update or a move.
+        writeAwsCliProfiles()
         // The network port is opened only once there is someone to serve.
         if machines.contains(where: { !$0.revoked }) || hasOtherDevices {
             listenForMachines()
