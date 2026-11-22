@@ -164,6 +164,8 @@ func openPage(_ flow: AwsSignInFlow) {
 public struct AwsSignInSheet: View {
     @ObservedObject var model: AppModel
     let folder: String?
+    /// Inside the Add dialog: another type was picked.
+    let onPickKind: ((AddKind) -> Void)?
     let onDone: () -> Void
 
     private enum Step {
@@ -184,9 +186,12 @@ public struct AwsSignInSheet: View {
     @State private var busy = false
     @State private var error: String?
 
-    public init(model: AppModel, folder: String? = nil, onDone: @escaping () -> Void) {
+    public init(
+        model: AppModel, folder: String? = nil, onPickKind: ((AddKind) -> Void)? = nil, onDone: @escaping () -> Void
+    ) {
         self.model = model
         self.folder = folder
+        self.onPickKind = onPickKind
         self.onDone = onDone
     }
 
@@ -219,11 +224,14 @@ public struct AwsSignInSheet: View {
 
     private var portalStep: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if let onPickKind {
+                Form {
+                    AddKindPicker(kind: Binding(get: { .aws }, set: { kind in if kind != .aws { onPickKind(kind) } }))
+                }
+                .formStyle(.columns)
+            }
             HStack(alignment: .top, spacing: 14) {
-                Image(systemName: "cloud")
-                    .font(.system(size: 30))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 44)
+                AwsLogo().frame(width: 44)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Add an AWS Sign-In").font(.system(size: 15, weight: .semibold))
                     Text(
@@ -393,7 +401,7 @@ public struct AwsSignInEditor: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 14) {
-                Image(systemName: "cloud").font(.system(size: 30)).foregroundStyle(.secondary).frame(width: 44)
+                AwsLogo().frame(width: 44)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(secret.name).font(.system(size: 15, weight: .semibold, design: .monospaced))
                     if let aws {

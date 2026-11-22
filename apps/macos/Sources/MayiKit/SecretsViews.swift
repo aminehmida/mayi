@@ -19,6 +19,8 @@ public struct SecretEditor: View {
     @State private var rotationDismissed = false
     let onSave: (SecretDraft.Change) async -> String?
     let onCancel: () -> Void
+    /// When adding: AWS Sign-In was picked as the type.
+    let onPickAws: (() -> Void)?
     @State var draft: SecretDraft
     @State var error: String?
     @State private var revealing = false
@@ -27,8 +29,10 @@ public struct SecretEditor: View {
         existing: SecretRecord?, draft: SecretDraft? = nil, error: String? = nil,
         onReveal: (() async -> Result<RevealedSecret, DraftError>)? = nil, revealOnOpen: Bool = false,
         loadsAtOnce: Bool = false, folders: [String] = [], onDismissRotation: (() -> String?)? = nil,
-        onSave: @escaping (SecretDraft.Change) async -> String?, onCancel: @escaping () -> Void
+        onSave: @escaping (SecretDraft.Change) async -> String?, onCancel: @escaping () -> Void,
+        onPickAws: (() -> Void)? = nil
     ) {
+        self.onPickAws = onPickAws
         self.existing = existing
         self.onReveal = onReveal
         self.revealOnOpen = revealOnOpen
@@ -84,10 +88,14 @@ public struct SecretEditor: View {
             ScrollViewReader { proxy in
                 Form {
                     Section {
-                        Picker("Type", selection: $draft.login) {
-                            Label("Secret", systemImage: "key").tag(false)
-                            Label("Website Login", systemImage: "globe").tag(true)
-                        }
+                        AddKindPicker(
+                            kind: Binding(
+                                get: { draft.login ? .login : .secret },
+                                set: { kind in
+                                    if kind == .aws { onPickAws?() } else { draft.login = kind == .login }
+                                }),
+                            offersAws: existing == nil && onPickAws != nil
+                        )
                         .disabled(existing != nil)
                         TextField("Name", text: $draft.name, prompt: Text(draft.login ? "github" : "GITHUB_TOKEN"))
                             .font(.system(.body, design: .monospaced))
@@ -355,10 +363,16 @@ struct SecretRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: secret.aws != nil ? "cloud" : secret.login ? "globe" : "key")
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
-                .accessibilityLabel(secret.aws != nil ? "AWS sign-in" : secret.login ? "Website login" : "Secret")
+            Group {
+                if secret.aws != nil {
+                    AwsLogo()
+                } else {
+                    Image(systemName: secret.login ? "globe" : "key")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(secret.login ? "Website login" : "Secret")
+                }
+            }
+            .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     if !secret.rotate.isEmpty {
@@ -561,12 +575,10 @@ public struct SecretsView: View {
     @State private var error: String?
 
     private enum AwsTarget: Identifiable {
-        case new
         case edit(SecretRecord)
 
         var id: String {
             switch self {
-            case .new: return ""
             case .edit(let secret): return secret.name
             }
         }
@@ -657,7 +669,6 @@ public struct SecretsView: View {
                     Text("Add an API key, a token, a website login or an AWS sign-in. An agent then uses it by name, with mayi run, mayi fill or aws --profile, and never sees the value.")
                 } actions: {
                     Button("Add Secret") { editor = .new }
-                    Button("Add AWS Sign-In") { aws = .new }
                 }
             } else if shown.isEmpty, !query.isEmpty {
                 ContentUnavailableView.search(text: query)
@@ -692,36 +703,23 @@ public struct SecretsView: View {
                 }
                 .disabled(secret(selection) == nil)
                 .help("Delete the selected secret")
-                Menu {
-                    Button("Secret or Login\u{2026}") { editor = .new }
-                    Button("AWS Sign-In\u{2026}") { aws = .new }
+                Button {
+                    editor = .new
                 } label: {
                     Label("Add", systemImage: "plus")
-                } primaryAction: {
-                    editor = .new
                 }
                 .help("Add a secret, a website login or an AWS sign-in")
             }
         }
         .sheet(item: $editor) { target in
-            SecretEditor(
-                existing: target.existing,
-                draft: target.existing == nil ? newDraft : nil,
-                onReveal: target.existing.map { secret in { await model.revealSecret(secret) } },
-                revealOnOpen: target.revealsAtOnce,
-                loadsAtOnce: target.existing.map { model.unlocked && $0.level < 4 } ?? false,
-                folders: model.folders,
-                onDismissRotation: target.existing.map { secret in { model.dismissRotation(name: secret.name) } },
-                onSave: { change in
-                    let problem = await model.save(change)
-                    if problem == nil { editor = nil }
-                    return problem
-                },
-                onCancel: { editor = nil })
+            if target.existing == nil {
+                AddSheet(model: model, folder: folder, draft: newDraft) { editor = nil }
+            } else {
+                editor(for: target)
+            }
         }
         .sheet(item: $aws) { target in
             switch target {
-            case .new: AwsSignInSheet(model: model, folder: folder) { aws = nil }
             case .edit(let secret): AwsSignInEditor(model: model, secret: secret) { aws = nil }
             }
         }
@@ -746,6 +744,54 @@ public struct SecretsView: View {
         return draft
     }
 
+    private func editor(for target: EditorTarget) -> some View {
+        SecretEditor(
+            existing: target.existing,
+            onReveal: target.existing.map { secret in { await model.revealSecret(secret) } },
+            revealOnOpen: target.revealsAtOnce,
+            loadsAtOnce: target.existing.map { model.unlocked && $0.level < 4 } ?? false,
+            folders: model.folders,
+            onDismissRotation: target.existing.map { secret in { model.dismissRotation(name: secret.name) } },
+            onSave: { change in
+                let problem = await model.save(change)
+                if problem == nil { editor = nil }
+                return problem
+            },
+            onCancel: { editor = nil })
+    }
+}
+
+/// The Add dialog: its Type picker chooses a secret, a website login or an
+/// AWS sign-in, each with its own form below.
+struct AddSheet: View {
+    @ObservedObject var model: AppModel
+    let folder: String?
+    let draft: SecretDraft
+    let onDone: () -> Void
+    @State private var kind: AddKind = .secret
+
+    var body: some View {
+        switch kind {
+        case .aws:
+            AwsSignInSheet(model: model, folder: folder, onPickKind: { kind = $0 }, onDone: onDone)
+        case .secret, .login:
+            SecretEditor(
+                existing: nil,
+                draft: {
+                    var start = draft
+                    start.login = kind == .login
+                    return start
+                }(),
+                folders: model.folders,
+                onSave: { change in
+                    let problem = await model.save(change)
+                    if problem == nil { onDone() }
+                    return problem
+                },
+                onCancel: onDone,
+                onPickAws: { kind = .aws })
+        }
+    }
 }
 
 // MARK: Activity
