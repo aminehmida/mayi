@@ -288,15 +288,15 @@ that, a change on either reaches the other the next time they can connect
 (at start, every five minutes, and after each change).
 
 - **The phone has the vault, the Mac is new:** on first launch the Mac app
-  shows a QR code under "Join Your Vault". On the phone, open Devices, choose
-  "Add device" and scan it (or type the code).
+  shows a QR code under "Join Your Vault". On the phone, open Devices, tap +,
+  then "Add a device", and scan it (or type the code).
 - **The Mac has the vault, the phone is new:** in the Mac app, Devices, "Add a
   Device…" shows a QR code. On the phone, choose "Scan code from another
   device".
 - **Two Macs:** paste one Mac's code into the other, either way round.
 
 - **Two phones:** the new phone chooses "Show a code for your other
-  device"; the other scans it from Devices, "Add device".
+  device"; the other scans it from Devices, +, "Add a device".
 
 A Mac or phone that already started an empty vault of its own shows "Join
 Another Vault…" in Devices: Mayi sets the empty vault aside and restarts

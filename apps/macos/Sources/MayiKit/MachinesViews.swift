@@ -86,7 +86,10 @@ public struct MachinesView: View {
 
     /// Paired machines; the machine a vault device runs on is shown as that
     /// device's agents instead.
-    private var paired: [MachineRecord] { model.machines.filter { $0.runsDevice == nil } }
+    /// Paired machines, revoked ones last.
+    private var paired: [MachineRecord] {
+        model.machines.filter { $0.runsDevice == nil }.sorted { !$0.revoked && $1.revoked }
+    }
     /// The devices that serve agents on their own machine, this Mac first.
     private var agentDevices: [DeviceInfo] {
         model.devices.filter { $0.agentsAcl != nil && !$0.removed }.sorted { $0.thisDevice && !$1.thisDevice }
@@ -137,10 +140,12 @@ public struct MachinesView: View {
             }
             Spacer()
             if revoked {
-                Text("Revoked").font(.callout).foregroundStyle(.red)
+                Text("Revoked").font(.callout).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 4)
+        // A revoked machine is history, not something to act on.
+        .opacity(revoked ? 0.55 : 1)
     }
 
     public var body: some View {

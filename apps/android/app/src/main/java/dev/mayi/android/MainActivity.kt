@@ -83,6 +83,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -120,6 +121,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -347,7 +349,7 @@ private fun Setup(app: MayiApp, scan: ((String) -> Unit) -> Unit, onReady: () ->
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            "On a Mac with your vault: Devices, Add a Device. On a phone: Devices, Add device, Show an invitation.",
+            "On a Mac with your vault: Devices, Add a Device. On a phone: Devices, +, Add a device, Show an invitation.",
             style = MaterialTheme.typography.bodySmall, color = quiet,
         )
         Spacer(Modifier.height(16.dp))
@@ -498,7 +500,7 @@ private fun JoinCodePanel(app: MayiApp, onJoined: () -> Unit, onBack: () -> Unit
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Show this to your other device", style = MaterialTheme.typography.titleMedium)
         Text(
-            "On a phone with your vault: Devices, Add device, Scan its code. On a Mac: Devices, Add a Device, then paste the code.",
+            "On a phone with your vault: Devices, +, Add a device, Scan its code. On a Mac: Devices, Add a Device, then paste the code.",
             style = MaterialTheme.typography.bodyMedium,
         )
         code?.let { CodeToPass(it, "Mayi code") }
@@ -584,11 +586,9 @@ private fun Home(app: MayiApp, scan: ((String) -> Unit) -> Unit, resumes: Mutabl
                     text = { Text("Add") },
                 )
             } else if (tab == 2) {
-                ExtendedFloatingActionButton(
-                    onClick = { addingDevice = true },
-                    icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                    text = { Text("Add device") },
-                )
+                FloatingActionButton(onClick = { addingDevice = true }) {
+                    Icon(Icons.Filled.Add, contentDescription = "Add a device, a machine or a recovery key")
+                }
             }
         },
     ) { padding ->
@@ -1863,9 +1863,41 @@ private fun Devices(
     // Agents on a vault device have one ACL, kept with that device; the
     // machine record it paired through is that same list, so it is not shown.
     val agentDevices = state.devices.filter { it.agentsAcl != null && !it.removed }
-    val paired = state.machines.filter { it.runsDevice == null }
+    val paired = state.machines.filter { it.runsDevice == null }.sortedBy { it.revoked }
+    var addingDevice by remember { mutableStateOf(false) }
+    val createRecoveryKey = {
+        Thread {
+            if (!app.unlock("Create a key that can open your vault without this phone")) {
+                error = "Creating a recovery key needs your fingerprint."
+            } else {
+                controller.createRecoveryKey()
+                    .onSuccess {
+                        recoveryKey = it
+                        error = null
+                    }
+                    .onFailure { error = it.message }
+            }
+        }.start()
+    }
 
-    if (adding) AddDevice(app, controller, state, scan) { setAdding(false) }
+    if (adding) {
+        AddChoice(
+            onPair = {
+                setAdding(false)
+                pairing = true
+            },
+            onDevice = {
+                setAdding(false)
+                addingDevice = true
+            },
+            onRecovery = {
+                setAdding(false)
+                createRecoveryKey()
+            },
+            onDismiss = { setAdding(false) },
+        )
+    }
+    if (addingDevice) AddDevice(app, controller, state, scan) { addingDevice = false }
     if (pairing) PairMachine(app, controller, state) { pairing = false }
     recoveryKey?.let { RecoveryKey(it) { recoveryKey = null } }
     when (val target = editingAcl) {
@@ -1922,7 +1954,8 @@ private fun Devices(
                 )
             }
         }
-        items(state.devices, key = { it.id }) { device ->
+        item { SectionHeader("Hold your vault", "Each keeps a copy of your secrets. Phones and Macs also answer agents’ requests.") }
+        items(state.devices.sortedBy { it.removed }, key = { it.id }) { device ->
             ListItem(
                 leadingContent = {
                     Icon(
@@ -1945,44 +1978,27 @@ private fun Devices(
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                 },
+                modifier = if (device.removed) Modifier.alpha(0.55f) else Modifier,
                 trailingContent = {
                     when {
-                        device.removed -> Text("Removed", color = scheme.error)
+                        device.removed -> Text("Removed", style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
                         !device.thisDevice -> TextButton(onClick = { removing = device }) { Text("Remove", color = scheme.error) }
                     }
                 },
             )
         }
-        item {
-            ListItem(
-                leadingContent = { Icon(Icons.Outlined.Key, contentDescription = null) },
-                headlineContent = { Text("Create recovery key") },
-                supportingContent = { Text("An offline key that restores the vault if your devices’ keys are lost") },
-                modifier = Modifier.clickable {
-                    Thread {
-                        if (!app.unlock("Create a key that can open your vault without this phone")) {
-                            error = "Creating a recovery key needs your fingerprint."
-                        } else {
-                            controller.createRecoveryKey()
-                                .onSuccess {
-                                    recoveryKey = it
-                                    error = null
-                                }
-                                .onFailure { error = it.message }
-                        }
-                    }.start()
-                },
-            )
-        }
-        item {
-            Row(
-                Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 24.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Machines", style = MaterialTheme.typography.titleSmall, color = scheme.primary, modifier = Modifier.weight(1f))
-                TextButton(onClick = { pairing = true }) { Text("Pair a machine") }
+        // Until there is one, a nudge: without it, losing every device loses the vault.
+        if (state.devices.none { it.recovery && !it.removed }) {
+            item {
+                ListItem(
+                    leadingContent = { Icon(Icons.Outlined.Key, contentDescription = null, tint = scheme.onSurfaceVariant) },
+                    headlineContent = { Text("No recovery key yet", color = scheme.onSurfaceVariant) },
+                    supportingContent = { Text("An offline key that restores the vault if you lose your devices. Tap to create one.") },
+                    modifier = Modifier.clickable { createRecoveryKey() },
+                )
             }
         }
+        item { SectionHeader("Ask for secrets", "Agents get only what their ACL allows, and store nothing.") }
         items(agentDevices, key = { "agents:" + it.id }) { device ->
             ListItem(
                 leadingContent = { Icon(Icons.Outlined.Laptop, contentDescription = null) },
@@ -1999,7 +2015,7 @@ private fun Devices(
         if (paired.isEmpty()) {
             item {
                 Text(
-                    "No paired machine yet. A paired machine, such as a server or a VM running agents, asks this vault for secrets and stores none.",
+                    "No paired machine yet. Pair a server or a VM running agents with +.",
                     style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
@@ -2015,10 +2031,11 @@ private fun Devices(
                         if (!machine.revoked) AclLine(machine.acl)
                     }
                 },
-                modifier = if (machine.revoked) Modifier else Modifier.clickable { editingAcl = machine },
+                // A revoked machine is history, not something to act on.
+                modifier = if (machine.revoked) Modifier.alpha(0.55f) else Modifier.clickable { editingAcl = machine },
                 trailingContent = {
                     if (machine.revoked) {
-                        Text("Revoked", color = scheme.error)
+                        Text("Revoked", style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
                     } else {
                         TextButton(onClick = {
                             controller.revokeMachine(machine.id)
@@ -2070,6 +2087,47 @@ private fun Devices(
             },
             dismissButton = { TextButton(onClick = { confirmJoin = false }) { Text("Cancel") } },
         )
+    }
+}
+
+/** What the Add button on Devices adds: a machine that asks, or a device that holds the vault. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddChoice(onPair: () -> Unit, onDevice: () -> Unit, onRecovery: () -> Unit, onDismiss: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(bottom = 28.dp)) {
+            Text("Add", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
+            ListItem(
+                leadingContent = { Icon(Icons.Outlined.PhoneAndroid, contentDescription = null) },
+                headlineContent = { Text("Add a device") },
+                supportingContent = { Text("A phone or Mac of yours. It holds a copy of every secret and answers requests.") },
+                modifier = Modifier.clickable(onClick = onDevice),
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            )
+            ListItem(
+                leadingContent = { Icon(Icons.Outlined.Dns, contentDescription = null) },
+                headlineContent = { Text("Pair a machine") },
+                supportingContent = { Text("A server or VM running agents. It asks for the secrets you choose and stores none.") },
+                modifier = Modifier.clickable(onClick = onPair),
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            )
+            ListItem(
+                leadingContent = { Icon(Icons.Outlined.Key, contentDescription = null) },
+                headlineContent = { Text("Create a recovery key") },
+                supportingContent = { Text("Kept offline by you. It restores the vault if you lose your devices.") },
+                modifier = Modifier.clickable(onClick = onRecovery),
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            )
+        }
+    }
+}
+
+/** A section of Devices: what its rows do, in a line. */
+@Composable
+private fun SectionHeader(title: String, about: String) {
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 4.dp)) {
+        Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+        Text(about, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
