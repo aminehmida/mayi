@@ -7,6 +7,8 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.text.format.DateUtils
 import android.widget.Toast
@@ -643,11 +645,12 @@ private fun Requests(controller: MayiController, state: MayiController.State, pr
                 }
             }
         }
-        if (state.pending.isEmpty() && state.notices.isEmpty()) {
+        if (state.pending.isEmpty() && state.notices.isEmpty() && state.signIns.isEmpty()) {
             EmptyState(Icons.Outlined.Notifications, "Nothing is waiting for you", "When an agent needs your say, its request appears here.")
             return@Column
         }
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(state.signIns, key = { "s${it.runId}" }) { needed -> SignInAgainCard(controller, needed) }
             items(state.pending, key = { "p${it.runId}" }) { prompt -> RequestCard(prompt) { controller.answer(prompt.runId, it) } }
             items(state.notices, key = { "n${it.notice.runId}" }) { active ->
                 NoticeCard(active, onStop = { controller.stop(active.notice.runId) }, onDismiss = { controller.dismiss(active.notice.runId) })
@@ -913,10 +916,14 @@ private fun Secrets(
                 val flagged = secret.rotate.isNotEmpty()
                 ListItem(
                     leadingContent = {
-                        Icon(
-                            if (secret.login) Icons.Outlined.Language else Icons.Outlined.Key,
-                            contentDescription = if (secret.login) "Website login" else "Secret",
-                        )
+                        if (secret.aws != null) {
+                            AwsLogo()
+                        } else {
+                            Icon(
+                                if (secret.login) Icons.Outlined.Language else Icons.Outlined.Key,
+                                contentDescription = if (secret.login) "Website login" else "Secret",
+                            )
+                        }
                     },
                     headlineContent = {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -955,10 +962,14 @@ private fun Secrets(
             onDismissRequest = { setAdding(false) },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
-            AddSecret(scan = scan, existing = null, onCancel = { setAdding(false) }, folders = folders, folder = selected) { draft ->
-                val problem = save(controller, draft)
-                if (problem == null) setAdding(false)
-                problem
+            AddSecret(
+                scan = scan, existing = null, onCancel = { setAdding(false) }, folders = folders, folder = selected,
+                controller = controller,
+            ) { draft, done ->
+                saveInBackground(controller, draft) { problem ->
+                    if (problem == null) setAdding(false)
+                    done(problem)
+                }
             }
         }
     }
@@ -972,10 +983,11 @@ private fun Secrets(
                 reveal = { done -> reveal(secret, done) }, revealOnOpen = showing,
                 loadsAtOnce = app.unlocked && secret.level < 4u, folders = folders,
                 onDismissRotation = { controller.dismissRotation(secret.name) },
-            ) { draft ->
-                val problem = save(controller, draft)
-                if (problem == null) editing = null
-                problem
+            ) { draft, done ->
+                saveInBackground(controller, draft) { problem ->
+                    if (problem == null) editing = null
+                    done(problem)
+                }
             }
         }
     }
@@ -985,21 +997,17 @@ private fun Secrets(
                 Modifier.padding(horizontal = 24.dp).padding(bottom = 28.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(secret.name, style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Monospace)
                 if (secret.aws == null) {
+                    Text(secret.name, style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Monospace)
                     LevelLabel(secret.level.toInt(), color = scheme.onSurface)
                     Text(
                         (if (secret.login) loginLevelDetails else levelDetails)[secret.level.toInt() - 1],
                         style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
                     )
                 } else {
-                    Text(
-                        "Each profile has its own level, and this phone answers requests for them. " +
-                            "Signing in to AWS and changing profiles happen in Mayi on your Mac for now.",
-                        style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
-                    )
+                    AwsSignInEditor(controller, secret) { detail = null }
                 }
-                Text(summary(secret) + ".", style = MaterialTheme.typography.bodyMedium)
+                if (secret.aws == null) Text(summary(secret) + ".", style = MaterialTheme.typography.bodyMedium)
                 secret.folder?.let { name ->
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Icon(Icons.Outlined.Folder, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
@@ -1070,7 +1078,20 @@ private fun folders(secrets: List<SecretRecord>) =
 
 private fun lines(text: String) = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
-/** Stores a draft: new values, or only the rules when no value was entered. */
+/**
+ * [save] off the main thread, answering on it: saving may ask for a
+ * fingerprint (lowering a level, adding an expected command), and that
+ * prompt needs the main thread free.
+ */
+private fun saveInBackground(controller: MayiController, draft: NewSecret, done: (String?) -> Unit) {
+    val main = Handler(Looper.getMainLooper())
+    Thread {
+        val problem = save(controller, draft)
+        main.post { done(problem) }
+    }.start()
+}
+
+/** Stores a draft: new values, or only the rules when no value was entered. Blocks. */
 private fun save(controller: MayiController, draft: NewSecret): String? {
     val problem = if (draft.values.isEmpty()) {
         controller.updateRules(draft.name, draft.allow, draft.maxGrantSecs, draft.sites, draft.folder)
@@ -1104,10 +1125,15 @@ private fun AddSecret(
     folder: String? = null,
     /** Drops the note that this secret should be replaced; returns an error. */
     onDismissRotation: (() -> String?)? = null,
-    onSave: (NewSecret) -> String?,
+    /** When adding: offers an AWS sign-in as a third type. */
+    controller: MayiController? = null,
+    /** Saves [NewSecret] and calls back on the main thread with an error, or null once saved. */
+    onSave: (NewSecret, (String?) -> Unit) -> Unit,
 ) {
     val editing = existing != null
     var login by remember { mutableStateOf(existing?.login ?: false) }
+    var aws by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf(existing?.name ?: "") }
     var value by remember { mutableStateOf("") }
     var allow by remember { mutableStateOf(existing?.allow?.joinToString("\n") ?: "") }
@@ -1215,19 +1241,27 @@ private fun AddSecret(
         Text(
             when {
                 existing != null -> "Edit ${existing.name}"
+                aws -> "New AWS sign-in"
                 login -> "New login"
                 else -> "New secret"
             },
             style = MaterialTheme.typography.titleLarge,
         )
         if (!editing) {
+            val kinds = listOfNotNull("Secret", "Login", controller?.let { "AWS" })
+            val chosen = if (aws) 2 else if (login) 1 else 0
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                listOf(false to "Secret", true to "Website login").forEachIndexed { index, (isLogin, label) ->
+                kinds.forEachIndexed { index, label ->
                     SegmentedButton(
-                        selected = login == isLogin, onClick = { login = isLogin },
-                        shape = SegmentedButtonDefaults.itemShape(index, 2),
-                    ) { Text(label) }
+                        selected = chosen == index,
+                        onClick = { aws = index == 2; login = index == 1 },
+                        shape = SegmentedButtonDefaults.itemShape(index, kinds.size),
+                    ) { Text(label, maxLines = 1) }
                 }
+            }
+            if (aws && controller != null) {
+                AwsSignInForm(controller, folder, onCancel = onCancel, onDone = onCancel)
+                return@Column
             }
             OutlinedTextField(
                 name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Name") },
@@ -1381,14 +1415,22 @@ private fun AddSecret(
                         editing && values.isEmpty() && level != existing?.level?.toInt() ->
                             if (login) "Changing the level re-encrypts it, so show its values first."
                             else "Changing the level re-encrypts it, so show or enter its value again."
-                        else -> onSave(
-                            NewSecret(
-                                name.trim(), level.toUByte(), values, if (login) emptyList() else lines(allow), maxGrant, login,
-                                if (login) lines(sites) else emptyList(), folderText.trim().ifEmpty { null },
-                            ),
-                        )
+                        else -> {
+                            saving = true
+                            onSave(
+                                NewSecret(
+                                    name.trim(), level.toUByte(), values, if (login) emptyList() else lines(allow), maxGrant, login,
+                                    if (login) lines(sites) else emptyList(), folderText.trim().ifEmpty { null },
+                                ),
+                            ) { problem ->
+                                saving = false
+                                error = problem
+                            }
+                            null
+                        }
                     }
                 },
+                enabled = !saving,
             ) { Text(if (editing) "Save" else if (login) "Add login" else "Add secret") }
         }
     }

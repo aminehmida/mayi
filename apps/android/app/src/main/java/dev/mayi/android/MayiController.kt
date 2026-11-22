@@ -2,6 +2,10 @@ package dev.mayi.android
 
 import dev.mayi.ffi.ApprovalChoice
 import dev.mayi.ffi.AuditRecord
+import dev.mayi.ffi.AwsAccountRecord
+import dev.mayi.ffi.AwsProfileRecord
+import dev.mayi.ffi.AwsSession
+import dev.mayi.ffi.AwsSignInFlow
 import dev.mayi.ffi.AwsSignInNeededInfo
 import dev.mayi.ffi.DeviceInfo
 import dev.mayi.ffi.KeyStore
@@ -42,6 +46,8 @@ class MayiController(
 
     data class State(
         val pending: List<PromptInfo> = emptyList(),
+        /** Requests waiting while the owner signs in to AWS again. */
+        val signIns: List<AwsSignInNeededInfo> = emptyList(),
         val notices: List<ActiveNotice> = emptyList(),
         val secrets: List<SecretRecord> = emptyList(),
         val devices: List<DeviceInfo> = emptyList(),
@@ -64,6 +70,7 @@ class MayiController(
 
     private val listeners = CopyOnWriteArrayList<(State) -> Unit>()
     private val answers = ConcurrentHashMap<ULong, CompletableFuture<ApprovalChoice>>()
+    private val signInAnswers = ConcurrentHashMap<ULong, CompletableFuture<Boolean>>()
     private val timer = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "mayi-timer").apply { isDaemon = true } }
 
     fun observe(listener: (State) -> Unit) = listeners.add(listener)
@@ -110,6 +117,7 @@ class MayiController(
 
     override fun withdraw(runId: ULong) {
         answers[runId]?.complete(ApprovalChoice.DENY)
+        signInAnswers[runId]?.complete(false)
     }
 
     override fun notify(notice: NoticeInfo) {
@@ -138,17 +146,69 @@ class MayiController(
     override fun incoming() = onIncoming()
 
     /**
-     * An AWS sign-in ended while a request needed it. Signing in to AWS from
-     * the phone comes in a later version: the request is refused with a
-     * message to sign in again in Mayi on the Mac.
+     * An AWS sign-in ended while a request needed it: shows it on the
+     * Requests tab and waits while the owner signs in again
+     * ([beginAwsSignIn], [finishAwsSignIn], [renewAwsSignIn]), then
+     * [answerSignIn]. The request carries on if they did.
      */
-    override fun signInNeeded(needed: AwsSignInNeededInfo): Boolean = false
+    override fun signInNeeded(needed: AwsSignInNeededInfo): Boolean {
+        val answer = CompletableFuture<Boolean>()
+        signInAnswers[needed.runId] = answer
+        update { it.copy(signIns = it.signIns + needed) }
+        try {
+            return answer.get(approvalTimeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            return false
+        } finally {
+            signInAnswers.remove(needed.runId)
+            update { s -> s.copy(signIns = s.signIns.filter { it.runId != needed.runId }) }
+            timer.schedule({ refresh() }, 300, TimeUnit.MILLISECONDS)
+        }
+    }
 
     // --- Called by the screens ------------------------------------------------
 
     fun answer(runId: ULong, choice: ApprovalChoice) {
         answers[runId]?.complete(choice)
     }
+
+    /** The owner signed in to AWS again for a waiting request, or gave up. */
+    fun answerSignIn(runId: ULong, signedIn: Boolean) {
+        signInAnswers[runId]?.complete(signedIn)
+    }
+
+    // --- AWS sign-ins: each blocks on the network, so call off the main thread
+
+    private fun <T> network(action: () -> T): Result<T> = try {
+        Result.success(action())
+    } catch (e: MayiException) {
+        Result.failure(IllegalStateException(describe(e)))
+    }
+
+    /** Starts signing in to an AWS portal: open [AwsSignInFlow.verificationUrl] in the browser. */
+    fun beginAwsSignIn(startUrl: String, region: String): Result<AwsSignInFlow> =
+        network { AwsSignInFlow.start(startUrl.trim(), region.trim()) }
+
+    /** Waits until the owner allows the sign-in in the browser. */
+    fun finishAwsSignIn(flow: AwsSignInFlow): Result<AwsSession> = network { flow.`wait`() }
+
+    /** The accounts and roles a new sign-in reaches. */
+    fun awsAccounts(session: AwsSession): Result<List<AwsAccountRecord>> = network { session.accounts() }
+
+    /** The accounts and roles a saved sign-in reaches, to add profiles. */
+    fun awsAccounts(name: String): Result<List<AwsAccountRecord>> =
+        result { it.awsAccounts(name) }
+
+    /** Saves a new AWS sign-in offering [profiles]. Returns an error message on failure. */
+    fun saveAwsSignIn(name: String, session: AwsSession, profiles: List<AwsProfileRecord>, folder: String?): String? =
+        attempt { it.putAwsSignIn(name.trim(), session, profiles, folder) }
+
+    /** Keeps the new session after signing in to a saved sign-in again. */
+    fun renewAwsSignIn(name: String, session: AwsSession): String? = attempt { it.renewAwsSignIn(name, session) }
+
+    /** Changes a sign-in's profiles: adding one or lowering a level asks for a fingerprint. */
+    fun updateAwsProfiles(name: String, profiles: List<AwsProfileRecord>): String? =
+        attempt { it.updateAwsProfiles(name, profiles) }
 
     /**
      * A secret's values, for its owner to see. Confirm they are present first;

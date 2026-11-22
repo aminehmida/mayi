@@ -155,7 +155,9 @@ class MayiApp : Application() {
         controller.observe { state ->
             if (state.pending.isNotEmpty() && foreground == null) {
                 alert("An agent is waiting for your approval")
-            } else if (state.pending.isEmpty()) {
+            } else if (state.signIns.isNotEmpty() && foreground == null) {
+                alert("Sign in to ${state.signIns.first().name} again: a command is waiting")
+            } else if (state.pending.isEmpty() && state.signIns.isEmpty()) {
                 manager.cancel(NOTE_ATTENTION)
             }
         }
