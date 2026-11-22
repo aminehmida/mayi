@@ -354,6 +354,9 @@ tests. Still to do by hand, against a real portal:
       to NAME again?"; signing in lets the waiting command finish.
 - [ ] The phone answers a request for a level 1 and a level 4 profile when
       the Mac is away (fingerprint for level 4).
+- [ ] On the phone: Add, AWS, sign in through the phone's browser, choose
+      levels, save; the sign-in reaches the Mac with the next sync. Editing a
+      profile there, and "Sign in again" on the Requests tab, work too.
 - [ ] From a paired machine, `mayi aws setup` writes the profiles there, and
       a level 1 profile notifies once per agent session, not per command.
 - [ ] Running `aws sso login` again shows a warning on the sign-in, and
