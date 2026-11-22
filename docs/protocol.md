@@ -159,6 +159,8 @@ names it, or shares one of its tags (tags compare without case).
   ACL chosen for an invitation with the pending token and gives it to the
   machine's record when `pair` succeeds. The token carries nothing about it,
   and the machine is never told its ACL.
+  A record without an ACL, from a machine paired before alpha.12, allows
+  every secret.
 - The requester on a vault device's own machine, over the socket or enrolled
   with `enrol_local`, uses that device's `agents` ACL, kept in the device's
   member record. A device sets it to `all` the first time it serves its

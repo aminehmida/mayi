@@ -220,8 +220,9 @@ pub struct RequesterRecord {
     /// device's agents' ACL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_to: Option<String>,
-    /// The secrets it may use, chosen when it was paired.
-    #[serde(default)]
+    /// The secrets it may use, chosen when it was paired. Machines paired
+    /// before ACLs (alpha.11 and earlier) keep every secret.
+    #[serde(default = "Acl::everything")]
     pub acl: Acl,
 }
 
@@ -475,6 +476,9 @@ impl Vault {
         if meta.id != id {
             return Err(Error::Crypto);
         }
+        // Folders gave way to tags in alpha.12: dropped, so the next save
+        // deletes them.
+        meta.unknown_fields.remove("folder");
         meta.version = version;
         Ok(meta)
     }
@@ -1537,6 +1541,23 @@ mod tests {
 
     /// Tags are kept tidy, and the editor's "usable by" follows the ACLs of
     /// the machines and of each device's agents.
+    #[test]
+    fn records_from_before_tags_and_acls() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault(&dir);
+        let mut meta = vault.put(item("TOKEN", Level::Approve, "x")).unwrap();
+        meta.unknown_fields.insert("folder".into(), "Work".into());
+        vault.write_meta(meta).unwrap();
+        assert!(vault.meta("TOKEN").unwrap().unknown_fields.is_empty(), "the folder is gone");
+
+        let old: RequesterRecord =
+            serde_json::from_str(r#"{"name":"vm","public":"00","added_ms":1,"revoked":false}"#).unwrap();
+        assert_eq!(old.acl, Acl::everything(), "a machine paired before ACLs keeps every secret");
+        let narrowed: RequesterRecord =
+            serde_json::from_str(r#"{"name":"vm","public":"00","added_ms":1,"revoked":false,"acl":{}}"#).unwrap();
+        assert!(narrowed.acl.is_empty(), "an ACL of nothing stays nothing");
+    }
+
     #[test]
     fn tags_and_who_may_use_a_secret() {
         let dir = tempfile::tempdir().unwrap();
