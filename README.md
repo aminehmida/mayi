@@ -318,7 +318,8 @@ and logins (values show after your fingerprint, and an orange dot marks a
 secret that is only on this phone), pair machines and edit their ACLs, add
 and remove devices,
 and make a recovery key. Tapping a request's notification opens it. It starts
-serving again after the phone restarts, and warns when notifications are
+serving again after the phone restarts, unless you chose Exit in its
+notification (then it stays off until you open Mayi), and warns when notifications are
 off or Android may stop it in the background, since requests could not reach
 you. It needs no Google services: the QR scanner uses the camera directly.
 

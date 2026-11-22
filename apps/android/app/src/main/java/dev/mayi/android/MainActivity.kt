@@ -170,7 +170,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        app.ensureServing()
+        app.opened()
         enableEdgeToEdge()
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
@@ -2043,6 +2043,12 @@ private fun Devices(
                         }) { Text("Revoke", color = scheme.error) }
                     }
                 },
+            )
+        }
+        item {
+            Text(
+                "Mayi ${app.version}", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
             )
         }
         // Room for the Add button to float without covering the last row.

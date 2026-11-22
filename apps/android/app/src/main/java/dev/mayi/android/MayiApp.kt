@@ -7,6 +7,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.graphics.drawable.Icon
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -23,6 +24,7 @@ import android.os.Looper
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.Process
 import android.os.SystemClock
 import android.provider.Settings
 import androidx.biometric.BiometricManager
@@ -144,11 +146,42 @@ class MayiApp : Application() {
      * replaces the earlier alarm.
      */
     fun scheduleRestartCheck() {
-        val check = PendingIntent.getBroadcast(
-            this, 0, Intent(this, RestartCheck::class.java), PendingIntent.FLAG_IMMUTABLE)
         getSystemService(AlarmManager::class.java).setInexactRepeating(
-            AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + RESTART_CHECK_MS, RESTART_CHECK_MS, check)
+            AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + RESTART_CHECK_MS, RESTART_CHECK_MS, restartCheck())
     }
+
+    private fun restartCheck(): PendingIntent = PendingIntent.getBroadcast(
+        this, 0, Intent(this, RestartCheck::class.java), PendingIntent.FLAG_IMMUTABLE)
+
+    private val prefs by lazy { getSharedPreferences("mayi", MODE_PRIVATE) }
+
+    /** The owner chose Exit: Mayi stays off, restarts of the phone included, until it is opened again. */
+    private var exited: Boolean
+        get() = prefs.getBoolean("exited", false)
+        set(value) {
+            prefs.edit().putBoolean("exited", value).commit()
+        }
+
+    /**
+     * Stops serving until the app is opened again: no restart check, no
+     * service, and no process, since the listener and sync live in it.
+     */
+    fun exit() {
+        exited = true
+        getSystemService(AlarmManager::class.java).cancel(restartCheck())
+        stopService(Intent(this, VaultService::class.java))
+        getSystemService(NotificationManager::class.java).cancelAll()
+        Handler(Looper.getMainLooper()).postDelayed({ Process.killProcess(Process.myPid()) }, 300)
+    }
+
+    /** The app was opened: serve again, even after Exit. */
+    fun opened() {
+        exited = false
+        ensureServing()
+    }
+
+    /** The app's version, as the release names it. */
+    val version: String by lazy { packageManager.getPackageInfo(packageName, 0).versionName ?: "" }
 
     override fun onCreate() {
         super.onCreate()
@@ -169,7 +202,7 @@ class MayiApp : Application() {
         // The service is not started here: the process may be starting in the
         // background, where Android refuses a foreground service. It is started
         // by the screen, the boot receiver and the restart check instead.
-        if (hasVault) scheduleRestartCheck()
+        if (hasVault && !exited) scheduleRestartCheck()
         // Locks when the screen goes off.
         ContextCompat.registerReceiver(
             this,
@@ -187,7 +220,7 @@ class MayiApp : Application() {
      * elsewhere it does nothing.
      */
     fun ensureServing() {
-        if (!hasVault) return
+        if (!hasVault || exited) return
         try {
             startService()
         } catch (e: IllegalStateException) {
@@ -382,6 +415,12 @@ class MayiApp : Application() {
         .setColor(LOGO_BLUE)
         .setContentTitle("Mayi is ready to answer requests")
         .setContentIntent(openAppIntent())
+        .addAction(
+            Notification.Action.Builder(
+                Icon.createWithResource(this, R.drawable.ic_stat_mayi), "Exit",
+                PendingIntent.getBroadcast(this, 2, Intent(this, ExitReceiver::class.java), PendingIntent.FLAG_IMMUTABLE),
+            ).build(),
+        )
         .setOngoing(true)
         .build()
 }
@@ -403,6 +442,13 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         (context.applicationContext as MayiApp).ensureServing()
+    }
+}
+
+/** Exit, from the service notification: see [MayiApp.exit]. */
+class ExitReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        (context.applicationContext as MayiApp).exit()
     }
 }
 
