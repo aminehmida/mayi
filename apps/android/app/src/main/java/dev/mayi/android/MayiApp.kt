@@ -39,6 +39,8 @@ private const val CHANNEL_SERVICE = "service"
 private const val CHANNEL_REQUESTS = "requests"
 private const val NOTE_SERVICE = 1
 private const val NOTE_ATTENTION = 2
+/** The logo's blue, for the notification icon where Android shows it in colour. */
+private const val LOGO_BLUE = 0xFF1F4FD8.toInt()
 /** An intent extra: open on the Requests tab. */
 const val EXTRA_OPEN_REQUESTS = "dev.mayi.android.OPEN_REQUESTS"
 
@@ -365,7 +367,8 @@ class MayiApp : Application() {
 
     private fun alert(text: String) {
         val notification = Notification.Builder(this, CHANNEL_REQUESTS)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
+            .setSmallIcon(R.drawable.ic_stat_mayi)
+            .setColor(LOGO_BLUE)
             .setContentTitle("Mayi")
             .setContentText(text)
             .setContentIntent(openRequestsIntent())
@@ -375,7 +378,8 @@ class MayiApp : Application() {
     }
 
     fun serviceNotification(): Notification = Notification.Builder(this, CHANNEL_SERVICE)
-        .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
+        .setSmallIcon(R.drawable.ic_stat_mayi)
+        .setColor(LOGO_BLUE)
         .setContentTitle("Mayi is ready to answer requests")
         .setContentIntent(openAppIntent())
         .setOngoing(true)
