@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use mayi_core::broker::{Approval, Broker, Notice, Prompt, Ui};
 use mayi_core::grants::GrantScope;
 use mayi_core::hardware::SoftwareKeys;
-use mayi_core::model::{Destination, Level, NewItem};
+use mayi_core::model::{Acl, Destination, Level, NewItem};
 use mayi_core::policy::Rules;
 use mayi_core::server::{join_vault, Server};
 use mayi_core::vault::Vault;
@@ -108,13 +108,13 @@ fn setup_with(allow: &[&str]) -> Setup {
         max_grant_secs: 600,
         destination: Destination::Command,
         sites: vec![],
-        folder: None,
+        tags: vec![],
     };
     mac_vault.put(secret).unwrap();
     let (_, mac_public) = mac_vault.noise_keypair().unwrap();
     let mac_port = free_port();
     let (machine_private, machine_public) = noise::generate_keypair().unwrap();
-    mac_vault.add_requester("vm", machine_public).unwrap();
+    mac_vault.add_requester("vm", machine_public, Acl::everything()).unwrap();
     let mac = serve(mac_vault, mac_port);
 
     let token = mac.server.start_enrolment(vec!["127.0.0.1".into()], mac_port, 60).unwrap();
@@ -153,10 +153,16 @@ impl Setup {
     }
 
     fn run_command(&self, argv: &[&str], env: &[(&str, &str)]) -> Child {
+        let mut args = vec!["run", "-s", "TOKEN", "-r", "a test", "--session", "s", "--"];
+        args.extend_from_slice(argv);
+        self.mayi(&args, env)
+    }
+
+    /// The real CLI as the paired machine, with these arguments.
+    fn mayi(&self, args: &[&str], env: &[(&str, &str)]) -> Child {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mayi"));
         command
-            .args(["run", "-s", "TOKEN", "-r", "a test", "--session", "s", "--"])
-            .args(argv)
+            .args(args)
             .env("MAYI_CONFIG", self.dir.path().join("requester.json"))
             // No vault device on this machine.
             .env("MAYI_HOME", self.dir.path())
@@ -353,4 +359,49 @@ fn a_program_runs_from_where_mayi_found_it_and_is_shown_so() {
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out, "unset|/usr/bin:/bin");
     assert_eq!(mac.owner.asked.load(Ordering::SeqCst), 1, "matched by name, not asked");
+}
+
+/// A machine whose ACL holds only `ci` gets a secret tagged `ci`, is refused
+/// any other without a prompt, and lists only what it may use; the phone,
+/// once synced, refuses the same.
+#[test]
+fn a_machine_uses_only_what_its_acl_allows() {
+    let mut setup = setup();
+    let vault = setup.mac.server.broker().vault();
+    vault
+        .put(NewItem {
+            name: "CI_TOKEN".into(),
+            level: Level::Log,
+            values: [("value".to_string(), Zeroizing::new("ci-secret".to_string()))].into_iter().collect(),
+            allow: vec![],
+            max_grant_secs: 600,
+            destination: Destination::Command,
+            sites: vec![],
+            tags: vec!["ci".into()],
+        })
+        .unwrap();
+    let vm = vault.requesters().unwrap().into_iter().find(|r| r.name == "vm").unwrap();
+    vault.set_requester_acl(&vm.id, Acl { tags: vec!["ci".into()], ..Acl::default() }).unwrap();
+
+    let (code, out, err) = finish(setup.mayi(&["run", "-s", "CI_TOKEN", "-r", "build", "--", "sh", "-c", "printf %s \"$CI_TOKEN\""], &[]));
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "[masked]");
+
+    let (code, _, err) = finish(setup.run(&[]));
+    assert_eq!(code, Some(77), "{err}");
+    assert!(err.contains("TOKEN is not in this machine's ACL"), "{err}");
+    assert_eq!(setup.mac.owner.asked.load(Ordering::SeqCst), 0, "nobody was asked");
+
+    let (code, out, err) = finish(setup.mayi(&["list"], &[]));
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.starts_with("CI_TOKEN\t") && !out.contains("\nTOKEN"), "{out}");
+
+    // The phone hears of the ACL with the machine's record.
+    let phone = setup.start_phone();
+    phone.server.sync_all().unwrap();
+    setup.only_phone();
+    let (code, _, err) = finish(setup.run(&[]));
+    assert_eq!(code, Some(77), "{err}");
+    assert!(err.contains("not in this machine's ACL"), "{err}");
+    assert_eq!(phone.owner.asked.load(Ordering::SeqCst), 0);
 }

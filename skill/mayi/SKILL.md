@@ -135,12 +135,18 @@ line only when something changes, such as
    Changing the command asks again.
 5. **A denial is an answer.** If the user denies a request, do not retry it or
    rephrase the reason. Say what you were trying to do and ask how to proceed.
+6. **Use what this machine may use.** `mayi list` shows only the secrets this
+   machine's ACL allows. A request for anything else is refused at once
+   (`is not in this machine's ACL`), without reaching the user. Do not retry
+   it or look for another secret holding the same thing: tell the user which
+   secret you need and that this machine's ACL does not include it; they can
+   add it in Mayi.
 
 ## Exit codes from mayi itself
 
 | Code | Meaning | What to do |
 |---|---|---|
-| 77 | Denied by the user, the fingerprint check failed, or the secret cannot be used that way (a login with `mayi run`). | Do not retry. Tell the user. |
+| 77 | Denied by the user, the fingerprint check failed, the secret is not in this machine's ACL, or it cannot be used that way (a login with `mayi run`). | Do not retry. Tell the user. |
 | 75 | A device showed the request but nobody answered in time (default 15 min; `--timeout SECONDS`). | Tell the user a request is waiting; retry once if they ask. |
 | 69 | None of the user's devices could be reached in time (default 1 hour; `--wait SECONDS`), or this machine is not paired. The message says when each device was last reached. | Tell the user; they may need to open Mayi on their phone, connect Tailscale, or run `mayi pair`. |
 | 65 | `mayi fill` could not fill the page: no sign-in field, another website, a refused form, or the page changed. | Read the message; fix the page or the selector, or ask the user. |

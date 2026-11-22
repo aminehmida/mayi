@@ -16,9 +16,9 @@ import Testing
             let device = try VaultDevice.open(vaultPath: path, deviceName: "test", keys: keys, ui: SilentUi())
             _ = try device.putSecret(
                 name: "TOKEN", level: 3, values: ["value": "abc"], allow: ["make *"], maxGrantSecs: 60, login: false,
-                sites: [], folder: nil)
+                sites: [], tags: [])
             _ = try device.putSecret(
-                name: "PROD", level: 4, values: ["value": "xyz"], allow: [], maxGrantSecs: 60, login: false, sites: [], folder: nil)
+                name: "PROD", level: 4, values: ["value": "xyz"], allow: [], maxGrantSecs: 60, login: false, sites: [], tags: [])
         }
         let reopened = try VaultDevice.open(vaultPath: path, deviceName: "test", keys: keys, ui: SilentUi())
         let secrets = try reopened.listSecrets()
@@ -26,7 +26,7 @@ import Testing
         #expect(secrets[1].allow == ["make *"])
         #expect(keys.prompts.isEmpty, "writing and listing never ask for biometrics")
 
-        let updated = try reopened.updateRules(name: "PROD", allow: ["deploy"], maxGrantSecs: 120, sites: [], folder: nil)
+        let updated = try reopened.updateRules(name: "PROD", allow: ["deploy"], maxGrantSecs: 120, sites: [], tags: [])
         #expect(updated.version > secrets[0].version && updated.level == 4)
 
         #expect(throws: MayiError.self) {
@@ -41,15 +41,15 @@ import Testing
         let saved = try device.putSecret(
             name: "github", level: 3,
             values: ["username": "amine", "password": "pw", "totp": "JBSWY3DPEHPK3PXP"], allow: [],
-            maxGrantSecs: 600, login: true, sites: ["https://GitHub.com/login"], folder: nil)
+            maxGrantSecs: 600, login: true, sites: ["https://GitHub.com/login"], tags: [])
         #expect(saved.login && saved.sites == ["github.com"])
         #expect(saved.fields == ["password", "totp", "username"])
-        let moved = try device.updateRules(name: "github", allow: [], maxGrantSecs: 60, sites: ["gitlab.com"], folder: nil)
+        let moved = try device.updateRules(name: "github", allow: [], maxGrantSecs: 60, sites: ["gitlab.com"], tags: [])
         #expect(moved.sites == ["gitlab.com"])
         #expect(throws: MayiError.self) {
             _ = try device.putSecret(
                 name: "bad", level: 3, values: ["password": "pw", "totp": "not a key!"], allow: [], maxGrantSecs: 0,
-                login: true, sites: ["a.com"], folder: nil)
+                login: true, sites: ["a.com"], tags: [])
         }
     }
 
@@ -74,7 +74,7 @@ import Testing
         do {
             let device = try VaultDevice.open(vaultPath: path, deviceName: "mac", keys: first, ui: SilentUi())
             _ = try device.putSecret(
-                name: "PROD", level: 4, values: ["value": "xyz"], allow: [], maxGrantSecs: 60, login: false, sites: [], folder: nil)
+                name: "PROD", level: 4, values: ["value": "xyz"], allow: [], maxGrantSecs: 60, login: false, sites: [], tags: [])
         }
 
         let second = try SecureEnclaveKeys.loadOrCreate(directory: keyDir, wrap: wrap)
@@ -126,6 +126,31 @@ import Testing
         #expect(after.biometricPublic() == fresh.biometricPublic(), "the new key is used from then on")
     }
 
+    /// Tags are typed separated by commas; an ACL being edited counts what
+    /// it grants, through tags or by name.
+    @Test func tagsAndAclDrafts() {
+        var draft = SecretDraft()
+        draft.tagsText = " work, , ci "
+        #expect(draft.tags == ["work", "ci"])
+
+        let tagged = SecretRecord(
+            name: "CI_TOKEN", level: 3, fields: ["value"], allow: [], maxGrantSecs: 0, version: 1, login: false,
+            sites: [], copies: 1, tags: ["CI"], rotate: [], aws: nil)
+        let plain = SecretRecord(
+            name: "PROD_DB", level: 3, fields: ["value"], allow: [], maxGrantSecs: 0, version: 1, login: false,
+            sites: [], copies: 1, tags: [], rotate: [], aws: nil)
+        var acl = AclDraft()
+        #expect(acl.isEmpty && !acl.allows(tagged))
+        acl.tags = ["ci"]
+        #expect(acl.allows(tagged) && !acl.allows(plain), "tags match whatever their case")
+        acl.secrets = ["PROD_DB"]
+        #expect(acl.allows(plain))
+        #expect(acl.record == AclRecord(all: false, tags: ["ci"], secrets: ["PROD_DB"]))
+        #expect(aclSummary(acl.record) == "#ci, PROD_DB")
+        #expect(aclSummary(AclRecord(all: true, tags: [], secrets: [])) == "all secrets")
+        #expect(aclSummary(AclRecord(all: false, tags: [], secrets: [])) == "nothing")
+    }
+
     /// Blobs from an earlier version are sealed on first load and the plain
     /// files deleted; a sealed blob opens only with its own key and under
     /// its own name.
@@ -168,13 +193,13 @@ import Testing
         for level in UInt8(1)...4 {
             _ = try device.putSecret(
                 name: "L\(level)", level: level, values: ["value": "smoke-secret-\(level)"], allow: [],
-                maxGrantSecs: 600, login: false, sites: [], folder: nil)
+                maxGrantSecs: 600, login: false, sites: [], tags: [])
         }
         if let site = ProcessInfo.processInfo.environment["MAYI_SMOKE_SITE"] {
             _ = try device.putSecret(
                 name: "smoke-login", level: 1,
                 values: ["username": "amine@example.com", "password": "hunter2-correct-horse"], allow: [],
-                maxGrantSecs: 600, login: true, sites: [site], folder: nil)
+                maxGrantSecs: 600, login: true, sites: [site], tags: [])
         }
     }
 }
@@ -182,10 +207,10 @@ import Testing
 @Suite struct SecretDraftTests {
     let stored = SecretRecord(
         name: "DB", level: 4, fields: ["user", "password"], allow: ["psql *"], maxGrantSecs: 600, version: 1,
-        login: false, sites: [], copies: 1, folder: nil, rotate: [], aws: nil)
+        login: false, sites: [], copies: 1, tags: [], rotate: [], aws: nil)
     let storedLogin = SecretRecord(
         name: "github", level: 3, fields: ["password", "totp", "username"], allow: [], maxGrantSecs: 600, version: 1,
-        login: true, sites: ["github.com"], copies: 2, folder: nil, rotate: [], aws: nil)
+        login: true, sites: ["github.com"], copies: 2, tags: [], rotate: [], aws: nil)
 
     @Test func newSecretNeedsNameAndValues() {
         var draft = SecretDraft()
@@ -200,7 +225,7 @@ import Testing
                 == .success(
                     .put(
                         name: "TOKEN", level: 3, values: ["value": "abc"], allow: ["gh *", "make deploy"],
-                        maxGrantSecs: 300, login: false, sites: [], folder: nil)))
+                        maxGrantSecs: 300, login: false, sites: [], tags: [])))
         draft.fields.append(.init(name: "value", value: "x"))
         #expect(draft.change(existing: nil) == .failure("Field names must be different."))
     }
@@ -211,7 +236,7 @@ import Testing
         draft.allowText = "psql *\npg_dump *"
         #expect(
             draft.change(existing: stored)
-                == .success(.rules(name: "DB", allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, sites: [], folder: nil)))
+                == .success(.rules(name: "DB", allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, sites: [], tags: [])))
     }
 
     @Test func changingLevelOrFieldsNeedsValues() {
@@ -228,7 +253,7 @@ import Testing
                 == .success(
                     .put(
                         name: "DB", level: 3, values: ["user": "admin", "password": "pw"], allow: ["psql *"],
-                        maxGrantSecs: 600, login: false, sites: [], folder: nil)))
+                        maxGrantSecs: 600, login: false, sites: [], tags: [])))
     }
 
     @Test func newLoginNeedsAWebsiteAndAPassword() {
@@ -245,7 +270,7 @@ import Testing
                 == .success(
                     .put(
                         name: "github", level: 3, values: ["username": "amine", "password": "pw"], allow: [],
-                        maxGrantSecs: 900, login: true, sites: ["github.com", "*.github.com"], folder: nil)))
+                        maxGrantSecs: 900, login: true, sites: ["github.com", "*.github.com"], tags: [])))
         draft.twoFactorKey = "JBSW Y3DP"
         guard case .success(.put(_, _, let values, _, _, _, _, _)) = draft.change(existing: nil) else {
             Issue.record("expected a put")
@@ -260,7 +285,7 @@ import Testing
         draft.sitesText = "github.com\ngist.github.com"
         #expect(
             draft.change(existing: storedLogin)
-                == .success(.rules(name: "github", allow: [], maxGrantSecs: 600, sites: ["github.com", "gist.github.com"], folder: nil)))
+                == .success(.rules(name: "github", allow: [], maxGrantSecs: 600, sites: ["github.com", "gist.github.com"], tags: [])))
         draft.username = "amine"
         #expect(draft.change(existing: storedLogin) == .failure("Show the login's values to change them."))
         draft.username = ""
@@ -280,7 +305,7 @@ import Testing
         draft.allowText = "psql *\npg_dump *"
         #expect(
             draft.change(existing: stored)
-                == .success(.rules(name: "DB", allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, sites: [], folder: nil)))
+                == .success(.rules(name: "DB", allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, sites: [], tags: [])))
         // Shown values make a level change possible without typing them again.
         draft.level = 3
         #expect(
@@ -288,7 +313,7 @@ import Testing
                 == .success(
                     .put(
                         name: "DB", level: 3, values: ["user": "admin", "password": "pw"],
-                        allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, login: false, sites: [], folder: nil)))
+                        allow: ["psql *", "pg_dump *"], maxGrantSecs: 600, login: false, sites: [], tags: [])))
     }
 
     @Test func aShownLoginKeepsItsTwoFactorKeyOutOfSight() {
@@ -302,7 +327,7 @@ import Testing
         #expect(draft.effectiveTwoFactorKey == "JBSWY3DPEHPK3PXP", "but it is kept")
         #expect(
             draft.change(existing: storedLogin)
-                == .success(.rules(name: "github", allow: [], maxGrantSecs: 600, sites: ["github.com"], folder: nil)))
+                == .success(.rules(name: "github", allow: [], maxGrantSecs: 600, sites: ["github.com"], tags: [])))
         func values(_ draft: SecretDraft) -> [String: String]? {
             guard case .success(.put(_, _, let values, _, _, _, _, _)) = draft.change(existing: storedLogin) else { return nil }
             return values

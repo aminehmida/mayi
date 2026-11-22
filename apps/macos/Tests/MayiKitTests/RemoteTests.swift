@@ -33,14 +33,14 @@ import Testing
             keys: TestKeys(),
             paths: MayiPaths(home: other.appendingPathComponent("home"), socket: other.appendingPathComponent("s.sock").path, port: 0),
             deviceName: "test")
-        #expect(await absent.startPairing() == "Pairing needs you to confirm, with Touch ID or your password.")
+        #expect(await absent.startPairing(acl: AclRecord(all: true, tags: [], secrets: [])) == "Pairing needs you to confirm, with Touch ID or your password.")
         #expect(absent.pairingToken == nil)
     }
 
     @Test func aPairedMachineRequestsOverTheNetwork() async throws {
         #expect(try await mayi(["list", "--remote"], environment: machine).status == 69, "not paired yet")
 
-        #expect(await model.startPairing() == nil)
+        #expect(await model.startPairing(acl: AclRecord(all: true, tags: [], secrets: [])) == nil)
         let token = try #require(model.pairingToken)
         let paired = try await mayi(["pair", token, "--name", "build-vm"], environment: machine)
         #expect(paired.status == 0)
@@ -63,5 +63,36 @@ import Testing
         let refused = try await mayi(["list", "--remote"], environment: machine)
         #expect(refused.status == 69)
         #expect(refused.err.contains("this machine is not paired"))
+    }
+
+    /// A machine paired with only a tag gets the secrets carrying it, is
+    /// refused the rest without a prompt, and lists only what it may use.
+    @Test func aMachineUsesOnlyWhatItsAclAllows() async throws {
+        #expect(model.saveSecret(name: "CI_TOKEN", level: 1, values: ["value": "ci"], allow: [], maxGrantSecs: 60, tags: ["ci"]) == nil)
+        #expect(model.usableBy(name: "CI_TOKEN", tags: ["ci"]) == ["Agents on test-mac"], "no machine yet")
+
+        #expect(await model.startPairing(acl: AclRecord(all: false, tags: ["ci"], secrets: [])) == nil)
+        let token = try #require(model.pairingToken)
+        #expect(try await mayi(["pair", token, "--name", "build-vm"], environment: machine).status == 0)
+        try await eventually { model.lastPaired == "build-vm" }
+        let vm = try #require(model.machines.first { $0.name == "build-vm" })
+        #expect(vm.acl == AclRecord(all: false, tags: ["ci"], secrets: []))
+        #expect(model.usableBy(name: "CI_TOKEN", tags: ["ci"]) == ["Agents on test-mac", "build-vm"])
+
+        let listed = try await mayi(["list", "--remote"], environment: machine)
+        #expect(listed.out.hasPrefix("CI_TOKEN\t") && !listed.out.contains("L1\t"))
+        let refused = try await mayi(["run", "--remote", "-s", "L1", "-r", "r", "--", "true"], environment: machine)
+        #expect(refused.status == 77)
+        #expect(refused.err.contains("L1 is not in this machine's ACL"))
+        #expect(model.notices.isEmpty && model.pending.isEmpty, "nobody was asked")
+
+        // Granted by name too, from Machines.
+        #expect(model.setMachineAcl(id: vm.id, acl: AclRecord(all: false, tags: ["ci"], secrets: ["L1"])) == nil)
+        let allowed = try await mayi(["run", "--remote", "-s", "L1", "-r", "r", "--", "true"], environment: machine)
+        #expect(allowed.status == 0)
+
+        // This Mac's agents have an ACL of their own, everything to start with.
+        let mac = try #require(model.devices.first { $0.thisDevice })
+        #expect(mac.agentsAcl == AclRecord(all: true, tags: [], secrets: []))
     }
 }

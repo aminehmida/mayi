@@ -177,6 +177,8 @@ public final class AppModel: ObservableObject {
         let device = try VaultDevice.open(
             vaultPath: paths.vault.path, deviceName: deviceName, keys: keys, ui: bridge)
         try device.serve(socketPath: paths.socket)
+        // This Mac serves agents: they get an ACL, of every secret at first.
+        _ = try? device.agentsAcl()
         try? device.setLocalEnrol(allowed: localEnrol)
         self.bridge = bridge
         self.device = device
@@ -406,7 +408,9 @@ public final class AppModel: ObservableObject {
 
     /// Opens a pairing invitation after the user proves they are present.
     /// Returns an error message on failure.
-    public func startPairing() async -> String? {
+    /// Opens an invitation for a machine that may use the secrets `acl`
+    /// allows once paired.
+    public func startPairing(acl: AclRecord) async -> String? {
         guard let device, let paths else { return "The vault is not open." }
         guard await unlock() else {
             return "Pairing needs you to confirm, with Touch ID or your password."
@@ -415,7 +419,7 @@ public final class AppModel: ObservableObject {
         do {
             lastPaired = nil
             pairingToken = try device.startPairing(
-                addresses: paths.advertise, ttlSecs: Self.pairingMinutes * 60)
+                addresses: paths.advertise, ttlSecs: Self.pairingMinutes * 60, acl: acl)
             return nil
         } catch {
             return describe(error)
@@ -455,7 +459,6 @@ public final class AppModel: ObservableObject {
     public func answer(_ id: UUID, _ choice: ApprovalChoice) {
         guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
         pending.remove(at: index).complete(choice)
-        refreshLogSoon()
     }
 
     /// Nobody answered in time; the prompt is no longer answerable.
@@ -470,7 +473,6 @@ public final class AppModel: ObservableObject {
         }
         guard let index = pending.firstIndex(where: { $0.prompt.runId == runId }) else { return }
         pending.remove(at: index).complete(.deny)
-        refreshLogSoon()
     }
 
     func enqueueSignIn(id: UUID, needed: AwsSignInNeededInfo, complete: @escaping (Bool) -> Void) {
@@ -481,7 +483,6 @@ public final class AppModel: ObservableObject {
     public func answerSignIn(_ id: UUID, signedIn: Bool) {
         guard let index = pendingSignIns.firstIndex(where: { $0.id == id }) else { return }
         pendingSignIns.remove(at: index).complete(signedIn)
-        refreshLogSoon()
     }
 
     func expireSignIn(_ id: UUID) {
@@ -492,11 +493,9 @@ public final class AppModel: ObservableObject {
 
     func show(_ notice: NoticeInfo) {
         notices.append(ActiveNotice(notice: notice))
-        refreshLogSoon()
     }
 
     func finished(runId: UInt64) {
-        refreshLogSoon()
         guard let index = notices.firstIndex(where: { $0.id == runId }) else { return }
         notices[index].ended = true
         DispatchQueue.main.asyncAfter(deadline: .now() + noticeLinger) { [weak self] in
@@ -526,21 +525,16 @@ public final class AppModel: ObservableObject {
         log = (try? device.auditTail(count: 200)) ?? []
     }
 
-    private func refreshLogSoon() {
-        // The core writes the audit entry just after calling back.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.refresh() }
-    }
-
     /// Creates or replaces a secret or a login. Returns an error message on failure.
     public func saveSecret(
         name: String, level: UInt8, values: [String: String], allow: [String], maxGrantSecs: UInt64,
-        login: Bool = false, sites: [String] = [], folder: String? = nil
+        login: Bool = false, sites: [String] = [], tags: [String] = []
     ) -> String? {
         guard let device else { return "The vault is not open." }
         do {
             _ = try device.putSecret(
                 name: name, level: level, values: values, allow: allow, maxGrantSecs: maxGrantSecs, login: login,
-                sites: sites, folder: folder)
+                sites: sites, tags: tags)
             refresh()
             syncNow()
             return nil
@@ -556,13 +550,13 @@ public final class AppModel: ObservableObject {
         let problem = await Task.detached { () -> String? in
             do {
                 switch change {
-                case .put(let name, let level, let values, let allow, let maxGrantSecs, let login, let sites, let folder):
+                case .put(let name, let level, let values, let allow, let maxGrantSecs, let login, let sites, let tags):
                     _ = try device.putSecret(
                         name: name, level: level, values: values, allow: allow, maxGrantSecs: maxGrantSecs,
-                        login: login, sites: sites, folder: folder)
-                case .rules(let name, let allow, let maxGrantSecs, let sites, let folder):
+                        login: login, sites: sites, tags: tags)
+                case .rules(let name, let allow, let maxGrantSecs, let sites, let tags):
                     _ = try device.updateRules(
-                        name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites, folder: folder)
+                        name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites, tags: tags)
                 }
                 return nil
             } catch {
@@ -597,14 +591,14 @@ public final class AppModel: ObservableObject {
     }
 
     /// Changes the allowed commands or websites, the approval lifetime and
-    /// the folder, keeping the values.
+    /// the tags, keeping the values.
     public func updateRules(
-        name: String, allow: [String], maxGrantSecs: UInt64, sites: [String] = [], folder: String? = nil
+        name: String, allow: [String], maxGrantSecs: UInt64, sites: [String] = [], tags: [String] = []
     ) -> String? {
         guard let device else { return "The vault is not open." }
         do {
             _ = try device.updateRules(
-                name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites, folder: folder)
+                name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: sites, tags: tags)
             refresh()
             syncNow()
             return nil
@@ -668,13 +662,13 @@ public final class AppModel: ObservableObject {
     /// Saves a new AWS sign-in. Then removes the AWS CLI's own saved
     /// sign-in to the same portal, which any program could read, if asked.
     public func saveAwsSignIn(
-        name: String, session: AwsSession, profiles: [AwsProfileRecord], folder: String?, forgetCliSignIns: Bool
+        name: String, session: AwsSession, profiles: [AwsProfileRecord], tags: [String], forgetCliSignIns: Bool
     ) async -> String? {
         guard let device else { return "The vault is not open." }
         let startUrl = session.startUrl()
         let problem = await Task.detached { () -> String? in
             do {
-                _ = try device.putAwsSignIn(name: name, session: session, profiles: profiles, folder: folder)
+                _ = try device.putAwsSignIn(name: name, session: session, profiles: profiles, tags: tags)
                 if forgetCliSignIns { _ = try? awsForgetCliSignIns(startUrl: startUrl) }
                 return nil
             } catch {
@@ -755,8 +749,44 @@ public final class AppModel: ObservableObject {
         Task.detached { _ = try? device.writeAwsCliProfiles(mayiPath: path, include: include) }
     }
 
-    /// The folders in use, sorted.
-    public var folders: [String] { Array(Set(secrets.compactMap(\.folder))).sorted() }
+    /// The tags in use, sorted.
+    public var tags: [String] {
+        Array(Set(secrets.flatMap(\.tags))).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    // MARK: ACLs
+
+    /// Who could use a secret with this name and these tags: the machines
+    /// and the devices' agents whose ACL allows it.
+    public func usableBy(name: String, tags: [String]) -> [String] {
+        (try? device?.usableBy(name: name, tags: tags)) ?? []
+    }
+
+    /// Changes which secrets a machine may use.
+    public func setMachineAcl(id: String, acl: AclRecord) -> String? {
+        guard let device else { return "The vault is not open." }
+        do {
+            try device.setMachineAcl(id: id, acl: acl)
+            refresh()
+            syncNow()
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// Changes which secrets the agents on a device's machine may use.
+    public func setAgentsAcl(deviceId: String, acl: AclRecord) -> String? {
+        guard let device else { return "The vault is not open." }
+        do {
+            try device.setAgentsAcl(deviceId: deviceId, acl: acl)
+            refresh()
+            syncNow()
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
 
     public func deleteSecret(name: String) -> String? {
         guard let device else { return "The vault is not open." }
@@ -823,6 +853,10 @@ final class UiBridge: UiDelegate, @unchecked Sendable {
     }
 
     func synced(changed: UInt64) {
+        DispatchQueue.main.async { [model] in MainActor.assumeIsolated { model?.refresh() } }
+    }
+
+    func logged() {
         DispatchQueue.main.async { [model] in MainActor.assumeIsolated { model?.refresh() } }
     }
 

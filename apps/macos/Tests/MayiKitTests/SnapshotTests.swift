@@ -51,7 +51,7 @@ import Testing
             dark: false)
         let stored = SecretRecord(
             name: "github", level: 3, fields: ["password", "totp", "username"], allow: [], maxGrantSecs: 600,
-            version: 1, login: true, sites: ["github.com"], copies: 2, folder: nil, rotate: [], aws: nil)
+            version: 1, login: true, sites: ["github.com"], copies: 2, tags: [], rotate: [], aws: nil)
         var shown = SecretDraft(editing: stored)
         shown.show(RevealedSecret(fields: [
             RevealedField(name: "password", value: "correct horse"), RevealedField(name: "totp", value: "JBSWY3DPEHPK3PXP"),
@@ -62,17 +62,35 @@ import Testing
             dark: false)
     }
 
-    @Test func rotationAndFolders() async throws {
+    @Test func rotationAndTags() async throws {
         let flagged = SecretRecord(
             name: "GITHUB_TOKEN", level: 3, fields: ["value"], allow: ["gh *"], maxGrantSecs: 900, version: 3,
-            login: false, sites: [], copies: 2, folder: "Work",
+            login: false, sites: [], copies: 2, tags: ["Work"],
             rotate: [RotateNoteRecord(who: "Mac mini (test)", why: "revoked", atMs: UInt64(Date().timeIntervalSince1970 * 1000))], aws: nil)
         try await snapshot(SecretRow(secret: flagged).frame(width: 520).padding(), name: "row-rotate", dark: false)
         try await snapshot(
             SecretEditor(
-                existing: flagged, folders: ["Personal", "Work"], onDismissRotation: { nil }, onSave: { _ in nil },
+                existing: flagged, tags: ["Personal", "Work"], usableBy: { _, _ in ["build-vm", "Agents on this Mac"] },
+                onDismissRotation: { nil }, onSave: { _ in nil },
                 onCancel: {}),
             name: "editor-rotate", dark: false)
+    }
+
+    @Test func aclEditor() async throws {
+        let secret = { (name: String, tags: [String]) in
+            SecretRecord(
+                name: name, level: 3, fields: ["value"], allow: [], maxGrantSecs: 0, version: 1, login: false,
+                sites: [], copies: 2, tags: tags, rotate: [], aws: nil)
+        }
+        try await snapshot(
+            AclEditor(
+                title: "Pair a Machine",
+                message: "Choose what the new machine may use. It is refused anything else, without asking you.",
+                confirm: "Create Invitation", acl: AclRecord(all: false, tags: ["ci"], secrets: ["PROD_DB"]),
+                tags: ["ci", "personal"],
+                secrets: [secret("CI_TOKEN", ["ci"]), secret("NPM_TOKEN", ["ci"]), secret("PROD_DB", []), secret("HOME_WIFI", ["personal"])],
+                onConfirm: { _ in }, onCancel: {}),
+            name: "acl-editor", dark: false)
     }
 
     @Test func notices() async throws {
@@ -89,10 +107,11 @@ import Testing
     @Test func editor() async throws {
         let stored = SecretRecord(
             name: "PROD_DB", level: 4, fields: ["password", "user"], allow: ["psql *", "pg_dump *"],
-            maxGrantSecs: 300, version: 2, login: false, sites: [], copies: 1, folder: nil, rotate: [], aws: nil)
+            maxGrantSecs: 300, version: 2, login: false, sites: [], copies: 1, tags: [], rotate: [], aws: nil)
         try await snapshot(
             SecretEditor(
                 existing: stored, error: "Changing the level re-encrypts the secret, so enter its values again.",
+                tags: ["ci", "prod"], usableBy: { _, tags in tags.contains("prod") ? ["Agents on this Mac", "laptop"] : ["Agents on this Mac"] },
                 onSave: { _ in nil }, onCancel: {}),
             name: "editor", dark: false)
         var shown = SecretDraft(editing: stored)
@@ -143,7 +162,7 @@ import Testing
                 home: dir.appendingPathComponent("home"), socket: dir.appendingPathComponent("s.sock").path),
             deviceName: "test")
         _ = model.saveSecret(
-            name: "GITHUB_TOKEN", level: 2, values: ["value": "x"], allow: ["gh *"], maxGrantSecs: 900, folder: "Work")
+            name: "GITHUB_TOKEN", level: 2, values: ["value": "x"], allow: ["gh *"], maxGrantSecs: 900, tags: ["Work"])
         _ = model.saveSecret(name: "PROD_DB", level: 4, values: ["value": "x"], allow: [], maxGrantSecs: 300)
         _ = NSApplication.shared
         let window = MainWindow.make(model: model)
@@ -172,7 +191,7 @@ import Testing
         _ = model.saveSecret(name: "AWS_SECRET_ACCESS_KEY", level: 3, values: ["value": "x"], allow: [], maxGrantSecs: 900)
         _ = model.saveSecret(
             name: "PROD_DB", level: 4, values: ["user": "x", "password": "y"], allow: ["psql *"], maxGrantSecs: 300)
-        _ = model.saveSecret(name: "NPM_TOKEN", level: 1, values: ["value": "x"], allow: [], maxGrantSecs: 900, folder: "Work")
+        _ = model.saveSecret(name: "NPM_TOKEN", level: 1, values: ["value": "x"], allow: [], maxGrantSecs: 900, tags: ["Work"])
         _ = model.saveSecret(
             name: "github", level: 3, values: ["username": "amine", "password": "x", "totp": "JBSWY3DPEHPK3PXP"],
             allow: [], maxGrantSecs: 600, login: true, sites: ["github.com"])
@@ -189,7 +208,7 @@ import Testing
         try await eventually { model.log.count == 3 }
         _ = NSApplication.shared
         for (section, dark) in [
-            (MainView.Section.secrets, false), (.secrets, true), (.activity, false), (.devices, true),
+            (MainView.Section.secrets, false), (.secrets, true), (.activity, false), (.devices, true), (.machines, false),
         ] {
             let window = MainWindow.make(model: model, section: section)
             try await capture(window, name: "window-\(section.rawValue.lowercased())-\(dark ? "dark" : "light")", dark: dark)

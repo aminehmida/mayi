@@ -894,7 +894,7 @@ mod tests {
             destination: Destination::Command,
             source: Source::AwsSso,
             sites: vec![],
-            folder: None,
+            tags: vec![],
             rotate: vec![],
             aws: Some(AwsSignIn { start_url: "https://mawaqit.awsapps.com/start".into(), region: "eu-west-3".into(), profiles }),
             unknown_fields: Default::default(),

@@ -157,9 +157,11 @@ with the QR button. The phone scans it with the camera. Each view is listed in
 Activity. An orange dot next to a secret means it is only on this Mac: it
 gets a second copy when another of your devices syncs.
 
-Search the Secrets list by name, website or folder. A secret can go in one
-folder, typed or picked when you add or edit it; folders appear in the
-sidebar on the Mac and as filters above the list on the phone.
+Search the Secrets list by name, website or tag. A secret can carry several
+tags, typed or picked when you add or edit it; tags appear in the sidebar on
+the Mac and as filters above the list on the phone. Tags also decide which
+machines may use a secret (see [ACLs](#acls)), so the editor shows who could
+use it as you type them.
 
 Activity is shared: each device sends what it recorded to the others when
 they sync, so any of them shows every request, which machine made it, and
@@ -248,13 +250,31 @@ scripts/build-linux.sh                 # static binaries, no dependencies
 scp target/x86_64-unknown-linux-musl/release/mayi server:/usr/local/bin/
 ```
 
-In the Mac app, open the Machines tab and choose "Pair a Machine…". Paste the
-command it shows on the other machine (`mayi pair mayi1.…`). After that,
+In the Mac app, open the Machines tab and choose "Pair a Machine…". Choose
+what the machine may use, then paste the command it shows on the other
+machine (`mayi pair mayi1.…`). After that,
 `mayi run` and `mayi list` work there as they do locally, as long as it can
 reach the Mac on port 7462 over the local network or a VPN such as Tailscale.
 
 Requests from another machine are marked as such, and level 1 secrets are
 raised to a notification. Revoke a machine from the same tab.
+
+### ACLs
+
+Each paired machine has an ACL: the secrets it may use, as whole tags, single
+secrets, or all secrets. Pairing asks for it first, with nothing ticked.
+Anything outside it is refused at once, without asking you, and the refusal
+is listed in Activity; `mayi list` on that machine shows only what it may
+use. A tag covers secrets you tag later too.
+
+Agents on a Mac with the app have an ACL as well, "Agents on <Mac>", for
+their requests through the app and, from there, to your other devices. It
+starts with all secrets.
+
+Change an ACL under Machines on the Mac or Devices on the phone. It reaches
+your other devices with the next sync, and each of them enforces it. An ACL
+limits which machine may use a secret, not what an agent on that machine
+does with it; that is the agent sandbox's job.
 
 A request waits for you rather than failing at once: `mayi` keeps trying your
 devices for up to an hour (`--wait`), then gives you 15 minutes to answer
@@ -293,9 +313,10 @@ ask your other devices" turns that off.
 No push service is involved, Google's or anyone's: a machine connects to the
 phone directly, over the same network or [Tailscale](https://tailscale.com).
 
-The phone app does what the Mac app does: add, view, search and file secrets
+The phone app does what the Mac app does: add, view, search and tag secrets
 and logins (values show after your fingerprint, and an orange dot marks a
-secret that is only on this phone), pair machines, add and remove devices,
+secret that is only on this phone), pair machines and edit their ACLs, add
+and remove devices,
 and make a recovery key. Tapping a request's notification opens it. It starts
 serving again after the phone restarts, and warns when notifications are
 off or Android may stop it in the background, since requests could not reach
@@ -351,7 +372,7 @@ target/debug/mayi-devd init
 target/debug/mayi-devd add GH_TOKEN --level 3
 target/debug/mayi-devd add github --login --site github.com   # asks for username, password, two-factor key
 target/debug/mayi-devd serve          # keep open: prompts appear here
-target/debug/mayi-devd serve --listen 0.0.0.0:7462   # also accept paired machines; type `pair`
+target/debug/mayi-devd serve --listen 0.0.0.0:7462   # also accept paired machines; type `pair` (all secrets) or `pair TAG…`
 ```
 
 ## Limits to know about

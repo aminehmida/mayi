@@ -12,8 +12,11 @@ public struct SecretEditor: View {
     /// Load the values when the editor opens, hidden behind their eyes: set
     /// when that asks nothing (Mayi is unlocked, the level is below 4).
     let loadsAtOnce: Bool
-    /// The folders in use, offered in the folder field.
-    let folders: [String]
+    /// The tags in use, offered in the tags field.
+    let tagsInUse: [String]
+    /// Who could use the secret with a name and tags: shown as they change,
+    /// so a tag never grants access unnoticed.
+    let usableBy: ((String, [String]) -> [String])?
     /// Drops the note that this secret should be rotated; returns an error.
     let onDismissRotation: (() -> String?)?
     @State private var rotationDismissed = false
@@ -28,7 +31,8 @@ public struct SecretEditor: View {
     public init(
         existing: SecretRecord?, draft: SecretDraft? = nil, error: String? = nil,
         onReveal: (() async -> Result<RevealedSecret, DraftError>)? = nil, revealOnOpen: Bool = false,
-        loadsAtOnce: Bool = false, folders: [String] = [], onDismissRotation: (() -> String?)? = nil,
+        loadsAtOnce: Bool = false, tags: [String] = [], usableBy: ((String, [String]) -> [String])? = nil,
+        onDismissRotation: (() -> String?)? = nil,
         onSave: @escaping (SecretDraft.Change) async -> String?, onCancel: @escaping () -> Void,
         onPickAws: (() -> Void)? = nil
     ) {
@@ -37,7 +41,8 @@ public struct SecretEditor: View {
         self.onReveal = onReveal
         self.revealOnOpen = revealOnOpen
         self.loadsAtOnce = loadsAtOnce
-        self.folders = folders
+        self.tagsInUse = tags
+        self.usableBy = usableBy
         self.onDismissRotation = onDismissRotation
         self.onSave = onSave
         self.onCancel = onCancel
@@ -106,22 +111,31 @@ public struct SecretEditor: View {
                             }
                         }
                         HStack {
-                            TextField("Folder", text: $draft.folderText, prompt: Text("none"))
+                            TextField("Tags", text: $draft.tagsText, prompt: Text("none, or several: work, ci"))
                             Menu {
-                                ForEach(folders, id: \.self) { folder in
-                                    Button(folder) { draft.folderText = folder }
+                                ForEach(tagsInUse.filter { tag in !draft.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame } }, id: \.self) { tag in
+                                    Button(tag) { draft.tagsText = (draft.tags + [tag]).joined(separator: ", ") }
                                 }
-                                if !draft.folderText.isEmpty {
+                                if !draft.tags.isEmpty {
                                     Divider()
-                                    Button("No Folder") { draft.folderText = "" }
+                                    Button("No Tags") { draft.tagsText = "" }
                                 }
                             } label: {
-                                Image(systemName: "folder")
+                                Image(systemName: "tag")
                             }
                             .menuStyle(.borderlessButton)
                             .fixedSize()
-                            .disabled(folders.isEmpty && draft.folderText.isEmpty)
-                            .help("Choose a folder in use")
+                            .disabled(tagsInUse.isEmpty && draft.tags.isEmpty)
+                            .help("Add a tag in use")
+                        }
+                        if let usableBy {
+                            let who = usableBy(draft.name.trimmingCharacters(in: .whitespaces), draft.tags)
+                            LabeledContent("Usable by") {
+                                Text(who.isEmpty ? "No machine" : who.joined(separator: ", "))
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                            .help("The machines whose ACL lets them use this secret, with these tags")
                         }
                     } footer: {
                         Text(
@@ -565,8 +579,8 @@ struct CopyButton: View {
 
 public struct SecretsView: View {
     @ObservedObject var model: AppModel
-    /// Only the secrets in this folder, when set.
-    let folder: String?
+    /// Only the secrets with this tag, when set.
+    let tag: String?
     @State private var query = ""
     @State private var selection: String?
     @State private var editor: EditorTarget?
@@ -620,23 +634,23 @@ public struct SecretsView: View {
         }
     }
 
-    public init(model: AppModel, folder: String? = nil) {
+    public init(model: AppModel, tag: String? = nil) {
         self.model = model
-        self.folder = folder
+        self.tag = tag
     }
 
     private func secret(_ name: String?) -> SecretRecord? {
         model.secrets.first { $0.name == name }
     }
 
-    /// The secrets in view: this folder's, matching the search by name,
-    /// folder, website or field.
+    /// The secrets in view: this tag's, matching the search by name, tag,
+    /// website or field.
     private var shown: [SecretRecord] {
         let words = query.lowercased().split(separator: " ").map(String.init)
         return model.secrets.filter { secret in
-            guard folder == nil || secret.folder == folder else { return false }
+            guard tag == nil || secret.tags.contains(tag!) else { return false }
             let profiles = secret.aws.map { [$0.startUrl] + $0.profiles.flatMap { [$0.name, $0.role, $0.accountName] } } ?? []
-            let text = ([secret.name, secret.folder ?? ""] + secret.sites + secret.fields + profiles)
+            let text = ([secret.name] + secret.tags + secret.sites + secret.fields + profiles)
                 .joined(separator: " ").lowercased()
             return words.allSatisfy { text.contains($0) }
         }
@@ -672,14 +686,14 @@ public struct SecretsView: View {
                 }
             } else if shown.isEmpty, !query.isEmpty {
                 ContentUnavailableView.search(text: query)
-            } else if shown.isEmpty, let folder {
+            } else if shown.isEmpty, let tag {
                 ContentUnavailableView(
-                    "\(folder) is empty", systemImage: "folder",
-                    description: Text("Move a secret here by choosing this folder when you edit it."))
+                    "Nothing tagged \(tag)", systemImage: "tag",
+                    description: Text("Add the tag to a secret when you edit it."))
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(message: error, isError: true) }
-        .navigationTitle(folder ?? "Secrets")
+        .navigationTitle(tag ?? "Secrets")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -713,7 +727,7 @@ public struct SecretsView: View {
         }
         .sheet(item: $editor) { target in
             if target.existing == nil {
-                AddSheet(model: model, folder: folder, draft: newDraft) { editor = nil }
+                AddSheet(model: model, tag: tag, draft: newDraft) { editor = nil }
             } else {
                 editor(for: target)
             }
@@ -737,10 +751,10 @@ public struct SecretsView: View {
         }
     }
 
-    /// A new secret starts in the folder being looked at.
+    /// A new secret starts with the tag being looked at.
     private var newDraft: SecretDraft {
         var draft = SecretDraft()
-        draft.folderText = folder ?? ""
+        draft.tagsText = tag ?? ""
         return draft
     }
 
@@ -750,7 +764,8 @@ public struct SecretsView: View {
             onReveal: target.existing.map { secret in { await model.revealSecret(secret) } },
             revealOnOpen: target.revealsAtOnce,
             loadsAtOnce: target.existing.map { model.unlocked && $0.level < 4 } ?? false,
-            folders: model.folders,
+            tags: model.tags,
+            usableBy: { name, tags in model.usableBy(name: name, tags: tags) },
             onDismissRotation: target.existing.map { secret in { model.dismissRotation(name: secret.name) } },
             onSave: { change in
                 let problem = await model.save(change)
@@ -765,7 +780,7 @@ public struct SecretsView: View {
 /// AWS sign-in, each with its own form below.
 struct AddSheet: View {
     @ObservedObject var model: AppModel
-    let folder: String?
+    let tag: String?
     let draft: SecretDraft
     let onDone: () -> Void
     @State private var kind: AddKind = .secret
@@ -773,7 +788,7 @@ struct AddSheet: View {
     var body: some View {
         switch kind {
         case .aws:
-            AwsSignInSheet(model: model, folder: folder, onPickKind: { kind = $0 }, onDone: onDone)
+            AwsSignInSheet(model: model, tag: tag, onPickKind: { kind = $0 }, onDone: onDone)
         case .secret, .login:
             SecretEditor(
                 existing: nil,
@@ -782,7 +797,8 @@ struct AddSheet: View {
                     start.login = kind == .login
                     return start
                 }(),
-                folders: model.folders,
+                tags: model.tags,
+                usableBy: { name, tags in model.usableBy(name: name, tags: tags) },
                 onSave: { change in
                     let problem = await model.save(change)
                     if problem == nil { onDone() }
@@ -984,16 +1000,16 @@ public struct MainView: View {
     @ObservedObject var model: AppModel
     @State private var place: Place?
 
-    /// A sidebar row: a section, or a folder of secrets under Secrets.
+    /// A sidebar row: a section, or a tag of secrets under Secrets.
     private enum Place: Hashable {
         case section(Section)
-        case folder(String)
+        case tag(String)
     }
 
     private var section: Section? {
         switch place {
         case .section(let section): return section
-        case .folder: return .secrets
+        case .tag: return .secrets
         case nil: return nil
         }
     }
@@ -1041,11 +1057,11 @@ public struct MainView: View {
                         .badge(count(item))
                         .tag(Place.section(item))
                     if item == .secrets {
-                        ForEach(model.folders, id: \.self) { folder in
-                            Label(folder, systemImage: "folder")
-                                .badge(model.secrets.filter { $0.folder == folder }.count)
+                        ForEach(model.tags, id: \.self) { tag in
+                            Label(tag, systemImage: "tag")
+                                .badge(model.secrets.filter { $0.tags.contains(tag) }.count)
                                 .padding(.leading, 14)
-                                .tag(Place.folder(folder))
+                                .tag(Place.tag(tag))
                         }
                     }
                 }
@@ -1054,7 +1070,7 @@ public struct MainView: View {
             .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 240)
         } detail: {
             switch place ?? .section(.secrets) {
-            case .folder(let folder): SecretsView(model: model, folder: folder).id(folder)
+            case .tag(let tag): SecretsView(model: model, tag: tag).id(tag)
             case .section(.secrets): SecretsView(model: model)
             case .section(.machines): MachinesView(model: model)
             case .section(.devices): DevicesView(model: model)

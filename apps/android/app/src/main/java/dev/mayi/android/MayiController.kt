@@ -1,5 +1,6 @@
 package dev.mayi.android
 
+import dev.mayi.ffi.AclRecord
 import dev.mayi.ffi.ApprovalChoice
 import dev.mayi.ffi.AuditRecord
 import dev.mayi.ffi.AwsAccountRecord
@@ -111,7 +112,6 @@ class MayiController(
         } finally {
             answers.remove(prompt.runId)
             update { s -> s.copy(pending = s.pending.filter { it.runId != prompt.runId }) }
-            timer.schedule({ refresh() }, 300, TimeUnit.MILLISECONDS)
         }
     }
 
@@ -126,7 +126,7 @@ class MayiController(
 
     override fun finished(runId: ULong, exitCode: Int?) {
         update { s -> s.copy(notices = s.notices.map { if (it.notice.runId == runId) it.copy(ended = true) else it }) }
-        timer.schedule({ dismiss(runId); refresh() }, noticeLingerMs, TimeUnit.MILLISECONDS)
+        timer.schedule({ dismiss(runId) }, noticeLingerMs, TimeUnit.MILLISECONDS)
     }
 
     override fun paired(name: String, id: String) {
@@ -140,6 +140,8 @@ class MayiController(
     }
 
     override fun synced(changed: ULong) = refresh()
+
+    override fun logged() = refresh()
 
     override fun userActive(): Boolean = userActive.invoke()
 
@@ -200,8 +202,8 @@ class MayiController(
         result { it.awsAccounts(name) }
 
     /** Saves a new AWS sign-in offering [profiles]. Returns an error message on failure. */
-    fun saveAwsSignIn(name: String, session: AwsSession, profiles: List<AwsProfileRecord>, folder: String?): String? =
-        attempt { it.putAwsSignIn(name.trim(), session, profiles, folder) }
+    fun saveAwsSignIn(name: String, session: AwsSession, profiles: List<AwsProfileRecord>, tags: List<String>): String? =
+        attempt { it.putAwsSignIn(name.trim(), session, profiles, tags) }
 
     /** Keeps the new session after signing in to a saved sign-in again. */
     fun renewAwsSignIn(name: String, session: AwsSession): String? = attempt { it.renewAwsSignIn(name, session) }
@@ -245,13 +247,13 @@ class MayiController(
     /** Creates or replaces a secret. Returns an error message on failure. */
     fun saveSecret(
         name: String, level: UByte, values: Map<String, String>, allow: List<String>, maxGrantSecs: ULong,
-        login: Boolean = false, sites: List<String> = emptyList(), folder: String? = null,
-    ): String? = attempt { it.putSecret(name, level, values, allow, maxGrantSecs, login, sites, folder) }
+        login: Boolean = false, sites: List<String> = emptyList(), tags: List<String> = emptyList(),
+    ): String? = attempt { it.putSecret(name, level, values, allow, maxGrantSecs, login, sites, tags) }
 
-    /** Changes a secret's expected commands, websites, grant cap and folder, keeping its values. */
+    /** Changes a secret's expected commands, websites, grant cap and tags, keeping its values. */
     fun updateRules(
-        name: String, allow: List<String>, maxGrantSecs: ULong, sites: List<String>, folder: String? = null,
-    ): String? = attempt { it.updateRules(name, allow, maxGrantSecs, sites, folder) }
+        name: String, allow: List<String>, maxGrantSecs: ULong, sites: List<String>, tags: List<String> = emptyList(),
+    ): String? = attempt { it.updateRules(name, allow, maxGrantSecs, sites, tags) }
 
     /** Drops the note that a secret should be replaced, once the owner checked it needs no replacing. */
     fun dismissRotation(name: String): String? = attempt { it.dismissRotation(name) }
@@ -269,11 +271,24 @@ class MayiController(
         }
     }
 
-    /** An invitation for a machine to pair (`mayi pair TOKEN` there), valid for [ttlSecs]. */
-    fun startPairing(ttlSecs: ULong): Result<String> {
+    /**
+     * An invitation for a machine to pair (`mayi pair TOKEN` there), valid for
+     * [ttlSecs]. The machine may use only what [acl] allows.
+     */
+    fun startPairing(ttlSecs: ULong, acl: AclRecord): Result<String> {
         update { it.copy(lastPaired = null) }
-        return result { it.startPairing(emptyList(), ttlSecs) }
+        return result { it.startPairing(emptyList(), ttlSecs, acl) }
     }
+
+    /** Changes which secrets a paired machine, or the agents behind it, may use. */
+    fun setMachineAcl(id: String, acl: AclRecord): String? = attempt { it.setMachineAcl(id, acl) }
+
+    /** Changes which secrets the agents on a vault device may use. */
+    fun setAgentsAcl(deviceId: String, acl: AclRecord): String? = attempt { it.setAgentsAcl(deviceId, acl) }
+
+    /** Who could use a secret with these tags: "Agents on …" and paired machines. */
+    fun usableBy(name: String, tags: List<String>): List<String> =
+        runCatching { device?.usableBy(name, tags) }.getOrNull() ?: emptyList()
 
     /** An invitation for a new device to scan or paste, valid for [ttlSecs]. */
     fun startEnrolment(ttlSecs: ULong): Result<String> {

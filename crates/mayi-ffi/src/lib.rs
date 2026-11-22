@@ -15,7 +15,7 @@ use mayi_core::broker::{Approval, Broker, Notice, Prompt, Requester, SignInNeede
 use mayi_core::crypto::Key;
 use mayi_core::grants::GrantScope;
 use mayi_core::hardware::HardwareKeys;
-use mayi_core::model::{AwsProfile, AwsSignIn, Destination, ItemMeta, Level, NewItem};
+use mayi_core::model::{Acl, AwsProfile, AwsSignIn, Destination, ItemMeta, Level, NewItem};
 use mayi_core::policy::{command_line, Rules};
 use mayi_core::server::{JoinCode, Server};
 use mayi_core::vault::Vault;
@@ -183,6 +183,9 @@ pub trait UiDelegate: Send + Sync {
     /// Another machine just connected: a phone stays awake for a moment so
     /// its request can arrive.
     fn incoming(&self);
+    /// An entry was added to the audit log, including a request refused
+    /// without asking anyone: refresh the activity shown.
+    fn logged(&self);
     /// An AWS sign-in ended while a request needed it. Blocks while the
     /// owner signs in again (`AwsSignInFlow`, then
     /// `VaultDevice.renew_aws_sign_in`); returns whether they did, and the
@@ -282,6 +285,10 @@ impl Ui for UiAdapter {
         self.0.incoming();
     }
 
+    fn logged(&self) {
+        self.0.logged();
+    }
+
     fn sign_in(&self, needed: &SignInNeeded) -> bool {
         self.0.sign_in_needed(AwsSignInNeededInfo {
             run_id: needed.run_id,
@@ -335,8 +342,8 @@ pub struct SecretRecord {
     /// How many devices hold its current version, as far as this one knows.
     /// With 1, it is lost if this device is.
     pub copies: u32,
-    /// The folder it is kept in, if any.
-    pub folder: Option<String>,
+    /// The tags it is filed under; machines granted a tag may use it.
+    pub tags: Vec<String>,
     /// Who may still know the value: replace it at its source, or dismiss.
     pub rotate: Vec<RotateNoteRecord>,
     /// For an AWS sign-in: its portal and profiles.
@@ -565,7 +572,7 @@ impl From<ItemMeta> for SecretRecord {
             sites: m.sites,
             // Only on this device until the next sync.
             copies: 1,
-            folder: m.folder,
+            tags: m.tags,
             rotate: m
                 .rotate
                 .into_iter()
@@ -620,6 +627,9 @@ pub struct MachineRecord {
     /// For the machine a vault device runs on, which enrolled itself through
     /// that device: the device's name.
     pub runs_device: Option<String>,
+    /// The secrets it may use: for the machine of a vault device, that
+    /// device's agents' ACL.
+    pub acl: AclRecord,
 }
 
 /// A device holding the vault.
@@ -633,6 +643,29 @@ pub struct DeviceInfo {
     pub this_device: bool,
     /// The offline recovery key rather than a device.
     pub recovery: bool,
+    /// For a device that serves agents on its own machine: their ACL.
+    pub agents_acl: Option<AclRecord>,
+}
+
+/// Which secrets a machine may use: all of them, those with any of `tags`,
+/// and those named in `secrets`.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct AclRecord {
+    pub all: bool,
+    pub tags: Vec<String>,
+    pub secrets: Vec<String>,
+}
+
+impl From<Acl> for AclRecord {
+    fn from(a: Acl) -> Self {
+        AclRecord { all: a.all, tags: a.tags, secrets: a.secrets }
+    }
+}
+
+impl From<AclRecord> for Acl {
+    fn from(a: AclRecord) -> Self {
+        Acl { all: a.all, tags: a.tags, secrets: a.secrets }
+    }
 }
 
 /// The outcome of syncing with one device.
@@ -832,6 +865,7 @@ impl VaultDevice {
                 port: d.port,
                 removed: d.removed,
                 recovery: d.recovery,
+                agents_acl: d.agents.map(AclRecord::from),
             })
             .collect())
     }
@@ -867,7 +901,9 @@ impl VaultDevice {
     /// other machine: one use, valid for `ttl_secs`. `addresses` are where
     /// that machine should look for this device; empty means this device's
     /// own network addresses. Call `serve_remote` first.
-    pub fn start_pairing(&self, addresses: Vec<String>, ttl_secs: u64) -> Result<String, MayiError> {
+    /// An invitation for a machine, which may use the secrets `acl` allows
+    /// once paired.
+    pub fn start_pairing(&self, addresses: Vec<String>, ttl_secs: u64, acl: AclRecord) -> Result<String, MayiError> {
         let port = self
             .remote_port
             .lock()
@@ -875,7 +911,33 @@ impl VaultDevice {
             .ok_or_else(|| MayiError::Failed { detail: "not accepting other machines yet".into() })?;
         let addresses =
             if addresses.is_empty() { mayi_core::server::local_addresses() } else { addresses };
-        Ok(self.server.start_pairing(addresses, port, ttl_secs)?)
+        Ok(self.server.start_pairing(addresses, port, ttl_secs, acl.into())?)
+    }
+
+    /// Changes which secrets a paired machine may use; for the machine of a
+    /// vault device, that device's agents' ACL.
+    pub fn set_machine_acl(&self, id: String, acl: AclRecord) -> Result<(), MayiError> {
+        let vault = self.vault();
+        match vault.requesters()?.into_iter().find(|r| r.id == id).and_then(|r| r.local_to) {
+            Some(device) => Ok(vault.set_agents_acl(&device, acl.into())?),
+            None => Ok(vault.set_requester_acl(&id, acl.into())?),
+        }
+    }
+
+    /// The ACL of the agents on this device's machine.
+    pub fn agents_acl(&self) -> Result<AclRecord, MayiError> {
+        Ok(self.vault().agents_acl_here()?.into())
+    }
+
+    /// Changes which secrets the agents on a device's machine may use.
+    pub fn set_agents_acl(&self, device_id: String, acl: AclRecord) -> Result<(), MayiError> {
+        Ok(self.vault().set_agents_acl(&device_id, acl.into())?)
+    }
+
+    /// Who could use a secret called `name` with these tags, for the
+    /// editor to show as they change.
+    pub fn usable_by(&self, name: String, tags: Vec<String>) -> Result<Vec<String>, MayiError> {
+        Ok(self.vault().usable_by(&name, &tags)?)
     }
 
     pub fn cancel_pairing(&self) {
@@ -891,6 +953,7 @@ impl VaultDevice {
             .requesters()?
             .into_iter()
             .map(|r| MachineRecord {
+                acl: vault.acl_for(&r).unwrap_or_default().into(),
                 runs_device: r.local_to.as_deref().and_then(device_name),
                 id: r.id,
                 name: r.name,
@@ -957,14 +1020,14 @@ impl VaultDevice {
         max_grant_secs: u64,
         login: bool,
         sites: Vec<String>,
-        folder: Option<String>,
+        tags: Vec<String>,
     ) -> Result<SecretRecord, MayiError> {
         let level = Level::try_from(level).map_err(|detail| MayiError::Failed { detail })?;
         let values = values.into_iter().map(|(k, v)| (k, Zeroizing::new(v))).collect();
         let destination = if login { Destination::Website } else { Destination::Command };
         Ok(self
             .vault()
-            .put(NewItem { name, level, values, allow, max_grant_secs, destination, sites, folder })?
+            .put(NewItem { name, level, values, allow, max_grant_secs, destination, sites, tags })?
             .into())
     }
 
@@ -974,11 +1037,11 @@ impl VaultDevice {
         name: String,
         session: Arc<AwsSession>,
         profiles: Vec<AwsProfileRecord>,
-        folder: Option<String>,
+        tags: Vec<String>,
     ) -> Result<SecretRecord, MayiError> {
         let profiles = profiles.into_iter().map(AwsProfile::try_from).collect::<Result<Vec<_>, _>>()?;
         let aws = AwsSignIn { start_url: session.session.start_url.clone(), region: session.session.region.clone(), profiles };
-        Ok(self.vault().put_aws(&name, aws, session.session.values(), folder)?.into())
+        Ok(self.vault().put_aws(&name, aws, session.session.values(), tags)?.into())
     }
 
     /// Replaces the session of the AWS sign-in `name` after signing in
@@ -1029,16 +1092,16 @@ impl VaultDevice {
         Ok(self.vault().dismiss_rotation(&name)?.into())
     }
 
-    /// Changes a secret's allowlist, grant cap, websites and folder, keeping its values.
+    /// Changes a secret's allowlist, grant cap, websites and tags, keeping its values.
     pub fn update_rules(
         &self,
         name: String,
         allow: Vec<String>,
         max_grant_secs: u64,
         sites: Vec<String>,
-        folder: Option<String>,
+        tags: Vec<String>,
     ) -> Result<SecretRecord, MayiError> {
-        Ok(self.vault().update_rules(&name, allow, max_grant_secs, sites, folder)?.into())
+        Ok(self.vault().update_rules(&name, allow, max_grant_secs, sites, tags)?.into())
     }
 
     pub fn remove_secret(&self, name: String) -> Result<(), MayiError> {

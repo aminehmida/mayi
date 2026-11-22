@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use mayi_core::broker::{Approval, Broker, Notice, Prompt, Ui};
 use mayi_core::hardware::SoftwareKeys;
-use mayi_core::model::{Destination, Level, NewItem};
+use mayi_core::model::{Acl, Destination, Level, NewItem};
 use mayi_core::policy::Rules;
 use mayi_core::server::{join_vault, JoinCode, Server};
 use mayi_core::vault::Vault;
@@ -71,7 +71,7 @@ fn item(name: &str, level: Level) -> NewItem {
         max_grant_secs: 600,
         destination: Destination::Command,
         sites: vec![],
-        folder: None,
+        tags: vec![],
     }
 }
 
@@ -95,7 +95,12 @@ fn a_second_device_joins_syncs_and_serves_the_same_machines() {
 
     // A machine pairs with the Mac before the phone exists.
     let machine_token =
-        PairingToken::decode(&mac.server.start_pairing(vec!["127.0.0.1".into()], mac.addr.port(), 60).unwrap()).unwrap();
+        PairingToken::decode(
+            &mac.server
+                .start_pairing(vec!["127.0.0.1".into()], mac.addr.port(), 60, Acl { tags: vec!["ci".into()], ..Acl::default() })
+                .unwrap(),
+        )
+        .unwrap();
     let (machine_key, _) = noise::generate_keypair().unwrap();
     {
         let mut stream = TcpStream::connect(mac.addr).unwrap();
@@ -107,6 +112,10 @@ fn a_second_device_joins_syncs_and_serves_the_same_machines() {
         write_frame(&mut writer, &ClientMsg::Pair { name: "vm".into() }).unwrap();
         assert!(matches!(read_frame(&mut reader).unwrap(), Some(ServerMsg::Paired { .. })));
     }
+    // It may use what the invitation said.
+    let vm = mac.server.broker().vault().requesters().unwrap().into_iter().find(|r| r.name == "vm").unwrap();
+    assert_eq!(vm.acl, Acl { tags: vec!["ci".into()], ..Acl::default() });
+    mac.server.broker().vault().set_requester_acl(&vm.id, Acl::everything()).unwrap();
 
     // A machine token does not admit a device, and the reverse.
     let phone_keys = Arc::new(SoftwareKeys::generate(|_| true));
@@ -322,6 +331,19 @@ fn the_machine_a_device_runs_on_enrols_itself_through_its_socket() {
         ..Default::default()
     });
     assert!(matches!(request(phone.addr, &machine_key, &phone_public, &run), Some(ServerMsg::Released { .. })));
+
+    // The Mac's agents are held to its agents' ACL, on its socket and,
+    // once synced, on the phone.
+    let vault = mac.server.broker().vault();
+    vault.set_agents_acl(vault.device_id(), Acl { tags: vec!["none-yet".into()], ..Acl::default() }).unwrap();
+    assert!(matches!(local(&socket, &ClientMsg::List), Some(ServerMsg::Secrets { secrets }) if secrets.is_empty()));
+    mac.server.sync_all().unwrap();
+    match request(phone.addr, &machine_key, &phone_public, &run) {
+        Some(ServerMsg::Denied { reason }) => assert_eq!(reason, "L1 is not in this machine's ACL"),
+        other => panic!("unexpected reply: {other:?}"),
+    }
+    vault.set_agents_acl(vault.device_id(), Acl::everything()).unwrap();
+    mac.server.sync_all().unwrap();
 
     // Switched off on the Mac: revoked everywhere, and no new enrolment.
     mac.server.set_local_enrol(false).unwrap();

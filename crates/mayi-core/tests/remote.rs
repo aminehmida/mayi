@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use mayi_core::broker::{Approval, Broker, Notice, Prompt, Ui};
 use mayi_core::hardware::SoftwareKeys;
-use mayi_core::model::{Destination, Level, NewItem};
+use mayi_core::model::{Acl, Destination, Level, NewItem};
 use mayi_core::policy::Rules;
 use mayi_core::server::Server;
 use mayi_core::vault::Vault;
@@ -74,7 +74,7 @@ fn device() -> Device {
                 max_grant_secs: 600,
                 destination: Destination::Command,
                 sites: vec![],
-                folder: None,
+                tags: vec![],
             })
             .unwrap();
     }
@@ -112,7 +112,7 @@ fn ask(tunnel: &mut Tunnel, msg: &ClientMsg) -> Option<ServerMsg> {
 /// Pairs a fresh machine and returns its key and the device's.
 fn pair(device: &Device, name: &str) -> (PrivateKey, PublicKey) {
     let token = PairingToken::decode(
-        &device.server.start_pairing(vec!["127.0.0.1".into()], device.addr.port(), 60).unwrap(),
+        &device.server.start_pairing(vec!["127.0.0.1".into()], device.addr.port(), 60, Acl::everything()).unwrap(),
     )
     .unwrap();
     let (private, _) = noise::generate_keypair().unwrap();
@@ -165,7 +165,7 @@ fn paired_machine_gets_secrets_through_the_tunnel() {
 #[test]
 fn a_token_works_once_and_expires() {
     let device = device();
-    let text = device.server.start_pairing(vec![], device.addr.port(), 60).unwrap();
+    let text = device.server.start_pairing(vec![], device.addr.port(), 60, Acl::everything()).unwrap();
     let token = PairingToken::decode(&text).unwrap();
     let (first, _) = noise::generate_keypair().unwrap();
     let mut t = tunnel(device.addr, MODE_PAIRING, &first, &token.device_public, Some(&token.secret)).unwrap();
@@ -174,10 +174,10 @@ fn a_token_works_once_and_expires() {
     let (second, _) = noise::generate_keypair().unwrap();
     assert!(tunnel(device.addr, MODE_PAIRING, &second, &token.device_public, Some(&token.secret)).is_err());
 
-    let expired = PairingToken::decode(&device.server.start_pairing(vec![], device.addr.port(), 0).unwrap()).unwrap();
+    let expired = PairingToken::decode(&device.server.start_pairing(vec![], device.addr.port(), 0, Acl::everything()).unwrap()).unwrap();
     assert!(tunnel(device.addr, MODE_PAIRING, &second, &expired.device_public, Some(&expired.secret)).is_err());
 
-    let open = PairingToken::decode(&device.server.start_pairing(vec![], device.addr.port(), 60).unwrap()).unwrap();
+    let open = PairingToken::decode(&device.server.start_pairing(vec![], device.addr.port(), 60, Acl::everything()).unwrap()).unwrap();
     assert!(
         tunnel(device.addr, MODE_PAIRING, &second, &open.device_public, Some(&[0u8; 32])).is_err(),
         "a wrong secret does not pair"

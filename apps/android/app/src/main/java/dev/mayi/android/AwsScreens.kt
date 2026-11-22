@@ -202,7 +202,7 @@ private const val CANCELLED = "the sign-in was cancelled"
  * AWS sign-in is picked.
  */
 @Composable
-fun AwsSignInForm(controller: MayiController, folder: String?, onCancel: () -> Unit, onDone: () -> Unit) {
+fun AwsSignInForm(controller: MayiController, tag: String?, onCancel: () -> Unit, onDone: () -> Unit) {
     val context = LocalContext.current
     var step by remember { mutableStateOf<Step>(Step.Portal) }
     var startUrl by remember { mutableStateOf("") }
@@ -298,7 +298,7 @@ fun AwsSignInForm(controller: MayiController, folder: String?, onCancel: () -> U
                     busy = true
                     error = null
                     val chosen = profiles.filter { it.enabled }.map { it.record() }
-                    val problem = withContext(Dispatchers.IO) { controller.saveAwsSignIn(name, session, chosen, folder) }
+                    val problem = withContext(Dispatchers.IO) { controller.saveAwsSignIn(name, session, chosen, listOfNotNull(tag)) }
                     busy = false
                     save = null
                     if (problem == null) {

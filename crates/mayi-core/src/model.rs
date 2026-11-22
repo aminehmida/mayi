@@ -160,9 +160,10 @@ pub struct ItemMeta {
     /// its subdomains, each with an optional port. Empty for other secrets.
     #[serde(default)]
     pub sites: Vec<String>,
-    /// The folder the owner keeps it in, for the apps' lists. Agents use names.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub folder: Option<String>,
+    /// Tags the owner files it under, for the apps' lists and for ACLs: a
+    /// machine granted a tag may use every secret carrying it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     /// Who may still know the value since a machine was revoked or a device
     /// removed. Cleared by saving a new value, or dismissed by the owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -196,7 +197,40 @@ pub struct NewItem {
     pub max_grant_secs: u64,
     pub destination: Destination,
     pub sites: Vec<String>,
-    pub folder: Option<String>,
+    pub tags: Vec<String>,
+}
+
+/// Which secrets a machine may use: its access control list. A request for
+/// any other secret is refused before anyone is asked, and listing hides
+/// them. It decides what may be asked for; levels still decide how.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acl {
+    /// Every secret.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
+    /// The secrets carrying any of these tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// These secrets, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
+}
+
+impl Acl {
+    pub fn everything() -> Self {
+        Self { all: true, ..Self::default() }
+    }
+
+    pub fn allows(&self, meta: &ItemMeta) -> bool {
+        self.all
+            || self.secrets.iter().any(|name| name == &meta.name)
+            || meta.tags.iter().any(|tag| self.tags.iter().any(|granted| granted.eq_ignore_ascii_case(tag)))
+    }
+
+    /// Grants nothing.
+    pub fn is_empty(&self) -> bool {
+        !self.all && self.tags.is_empty() && self.secrets.is_empty()
+    }
 }
 
 #[cfg(test)]

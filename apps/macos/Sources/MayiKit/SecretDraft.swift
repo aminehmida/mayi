@@ -21,9 +21,9 @@ public struct SecretDraft: Equatable {
         /// Store new values (creating the secret or replacing it).
         case put(
             name: String, level: UInt8, values: [String: String], allow: [String], maxGrantSecs: UInt64,
-            login: Bool, sites: [String], folder: String?)
-        /// Keep the stored values; change only the rules and the folder.
-        case rules(name: String, allow: [String], maxGrantSecs: UInt64, sites: [String], folder: String?)
+            login: Bool, sites: [String], tags: [String])
+        /// Keep the stored values; change only the rules and the tags.
+        case rules(name: String, allow: [String], maxGrantSecs: UInt64, sites: [String], tags: [String])
     }
 
     public var name = ""
@@ -45,8 +45,8 @@ public struct SecretDraft: Equatable {
     public var removeTwoFactor = false
     /// One website per line.
     public var sitesText = ""
-    /// The folder it is kept in; empty for none.
-    public var folderText = ""
+    /// Its tags, separated by commas.
+    public var tagsText = ""
     /// The stored values, once shown to the owner: saving them unchanged
     /// changes only the rules. Nil until shown.
     public var shown: [String: String]?
@@ -60,7 +60,7 @@ public struct SecretDraft: Equatable {
         fields = secret.fields.map { Field(name: $0) }
         allowText = secret.allow.joined(separator: "\n")
         sitesText = secret.sites.joined(separator: "\n")
-        folderText = secret.folder ?? ""
+        tagsText = secret.tags.joined(separator: ", ")
         maxGrantMinutes = Int(secret.maxGrantSecs / 60)
     }
 
@@ -96,9 +96,9 @@ public struct SecretDraft: Equatable {
     }
 
     var allow: [String] { Self.lines(allowText) }
-    var folder: String? {
-        let trimmed = folderText.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? nil : trimmed
+    /// The tags typed, trimmed, without empty ones.
+    var tags: [String] {
+        tagsText.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
     var sites: [String] { Self.lines(sitesText) }
 
@@ -122,17 +122,17 @@ public struct SecretDraft: Equatable {
             if Set(names) != Set(existing.fields) {
                 return .failure("Changing the fields replaces the secret, so enter its values.")
             }
-            return .success(.rules(name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: [], folder: folder))
+            return .success(.rules(name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: [], tags: tags))
         }
         if fields.contains(where: { $0.value.isEmpty }) {
             return .failure("Enter a value for every field.")
         }
         let values = Dictionary(uniqueKeysWithValues: zip(names, fields.map(\.value)))
         if let existing, values == shown, level == existing.level {
-            return .success(.rules(name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: [], folder: folder))
+            return .success(.rules(name: name, allow: allow, maxGrantSecs: maxGrantSecs, sites: [], tags: tags))
         }
         return .success(
-            .put(name: name, level: level, values: values, allow: allow, maxGrantSecs: maxGrantSecs, login: false, sites: [], folder: folder))
+            .put(name: name, level: level, values: values, allow: allow, maxGrantSecs: maxGrantSecs, login: false, sites: [], tags: tags))
     }
 
     private func loginChange(name: String, existing: SecretRecord?, maxGrantSecs: UInt64) -> Result<Change, DraftError> {
@@ -146,7 +146,7 @@ public struct SecretDraft: Equatable {
             if level != existing.level {
                 return .failure("Changing the level re-encrypts the login, so show its values first.")
             }
-            return .success(.rules(name: name, allow: [], maxGrantSecs: maxGrantSecs, sites: sites, folder: folder))
+            return .success(.rules(name: name, allow: [], maxGrantSecs: maxGrantSecs, sites: sites, tags: tags))
         }
         if password.isEmpty { return .failure("Enter the password.") }
         var values = ["password": password]
@@ -154,10 +154,10 @@ public struct SecretDraft: Equatable {
         if !user.isEmpty { values["username"] = user }
         if let key = effectiveTwoFactorKey { values["totp"] = key }
         if let existing, values == shown, level == existing.level {
-            return .success(.rules(name: name, allow: [], maxGrantSecs: maxGrantSecs, sites: sites, folder: folder))
+            return .success(.rules(name: name, allow: [], maxGrantSecs: maxGrantSecs, sites: sites, tags: tags))
         }
         return .success(
-            .put(name: name, level: level, values: values, allow: [], maxGrantSecs: maxGrantSecs, login: true, sites: sites, folder: folder))
+            .put(name: name, level: level, values: values, allow: [], maxGrantSecs: maxGrantSecs, login: true, sites: sites, tags: tags))
     }
 }
 

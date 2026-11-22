@@ -116,8 +116,32 @@ not know leaks it into the transcript.
 
 **Limits.** Whatever was released to commands on that machine was in its
 memory, and must be considered exposed if the machine was compromised at the
-time. A stolen identity key gets level 1 and 2 secrets with only a
-notification as warning.
+time. A stolen identity key gets the level 1 and 2 secrets in the machine's
+ACL with only a notification as warning.
+
+### ACLs
+
+Each paired machine, and the agents on each vault device's machine, may use
+only the secrets in its ACL: whole tags, single secrets, or all of them.
+Every device checks it before levels and before asking anyone, and lists
+only what is allowed.
+
+- ACLs guard against mistakes and over-reach: an agent on a CI machine that
+  asks for a production key is refused outright, and a stolen machine key
+  reaches only what that machine's ACL allows.
+- They are records of the vault, synced like secrets, so whichever device
+  answers enforces the same list.
+
+**Limits.**
+
+- An ACL says which machine may use a secret, not which agent or command on
+  it. Any process on an allowed machine can ask for anything in its ACL, so a
+  compromised agent there remains the sandbox's job.
+- A tag covers secrets tagged later, so tagging a secret can let machines use
+  it. The editor shows who could use the secret as the tags are typed, and
+  the ACL editor shows how many secrets each tag covers.
+- Like levels 1 to 3, ACLs are policy: malware on a vault device can change
+  them.
 
 ### An attacker on the network
 

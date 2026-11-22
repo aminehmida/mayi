@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use mayi_core::broker::{Approval, Broker, Notice, Prompt, Requester, Ui};
 use mayi_core::grants::GrantScope;
 use mayi_core::hardware::SoftwareKeys;
-use mayi_core::model::{Destination, Level, NewItem, SecretValues};
+use mayi_core::model::{Acl, Destination, Level, NewItem, SecretValues};
 use mayi_core::policy::{command_line, Rules};
 use mayi_core::server::Server;
 use mayi_core::vault::Vault;
@@ -219,7 +219,7 @@ fn add(args: AddArgs) -> Res<()> {
     }
     let level = Level::try_from(level)?;
     let destination = if login { Destination::Website } else { Destination::Command };
-    let meta = vault.put(NewItem { name, level, values, allow, max_grant_secs: max_grant, destination, sites, folder: None })?;
+    let meta = vault.put(NewItem { name, level, values, allow, max_grant_secs: max_grant, destination, sites, tags: Vec::new() })?;
     let sites = if meta.sites.is_empty() { String::new() } else { format!(" for {}", meta.sites.join(", ")) };
     println!("Saved {}{sites} at level {} (version {})", meta.name, meta.level as u8, meta.version);
     Ok(())
@@ -421,7 +421,7 @@ fn add_aws(name: String, start_url: String, region: String) -> Res<()> {
     let session = sign_in.wait(api.as_ref(), &AtomicBool::new(false))?;
     let profiles = suggest_profiles(&session.accounts(api.as_ref())?);
     let aws = mayi_core::model::AwsSignIn { start_url: session.start_url.clone(), region, profiles };
-    let meta = vault.put_aws(&name, aws, session.values(), None)?;
+    let meta = vault.put_aws(&name, aws, session.values(), Vec::new())?;
     for p in meta.aws.map(|a| a.profiles).unwrap_or_default() {
         println!("{name}/{}\tlevel {}\t{} in {} ({})", p.name, p.level as u8, p.role, p.account_name, p.account_id);
     }
@@ -512,10 +512,13 @@ fn serve(listen: Option<String>) -> Res<()> {
                             }
                         });
                     }
-                    _ if line.trim() == "pair" => match port {
+                    // `pair` grants every secret; `pair TAG…` only those tags.
+                    _ if line.trim() == "pair" || line.trim().starts_with("pair ") => match port {
                         None => eprintln!("start with `serve --listen <address>` to pair machines"),
                         Some(port) => {
-                            match server.start_pairing(advertised(), port, 600) {
+                            let tags: Vec<String> = line.split_whitespace().skip(1).map(String::from).collect();
+                            let acl = if tags.is_empty() { Acl::everything() } else { Acl { tags, ..Acl::default() } };
+                            match server.start_pairing(advertised(), port, 600, acl) {
                                 // On stdout, alone, so scripts can capture it.
                                 Ok(token) => {
                                     eprintln!("run on the other machine within 10 minutes:  mayi pair <token>");
@@ -558,8 +561,15 @@ fn serve(listen: Option<String>) -> Res<()> {
                         }
                     }
                     _ if line.trim() == "machines" => {
-                        for m in server.broker().vault().requesters().unwrap_or_default() {
-                            eprintln!("{}\t{}{}", m.id, m.name, if m.revoked { "\trevoked" } else { "" });
+                        let vault = server.broker().vault();
+                        for m in vault.requesters().unwrap_or_default() {
+                            let acl = vault.acl_for(&m).unwrap_or_default();
+                            let grants = if acl.all {
+                                "all secrets".to_string()
+                            } else {
+                                acl.tags.iter().map(|t| format!("#{t}")).chain(acl.secrets.iter().cloned()).collect::<Vec<_>>().join(", ")
+                            };
+                            eprintln!("{}\t{}\tACL: {grants}{}", m.id, m.name, if m.revoked { "\trevoked" } else { "" });
                         }
                     }
                     _ if line.trim().is_empty() => {}

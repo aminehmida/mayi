@@ -51,6 +51,7 @@ final class SilentUi: UiDelegate, @unchecked Sendable {
     func userActive() -> Bool { false }
     func incoming() {}
     func signInNeeded(needed: AwsSignInNeededInfo) -> Bool { false }
+    func logged() {}
 }
 
 /// A scratch directory short enough for a unix socket path.

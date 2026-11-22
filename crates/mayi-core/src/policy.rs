@@ -153,7 +153,7 @@ mod tests {
             destination: Default::default(),
             source: Default::default(),
             sites: vec![],
-            folder: None,
+            tags: vec![],
             rotate: vec![],
             aws: None,
             unknown_fields: Default::default(),

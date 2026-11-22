@@ -21,7 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Sell
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.SuggestionChip
@@ -46,6 +46,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -75,6 +76,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -85,6 +87,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -98,6 +101,7 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -117,6 +121,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -129,10 +134,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.fragment.app.FragmentActivity
+import dev.mayi.ffi.AclRecord
 import dev.mayi.ffi.ApprovalChoice
 import dev.mayi.ffi.AuditRecord
 import dev.mayi.ffi.DeviceInfo
 import dev.mayi.ffi.JoinInvitation
+import dev.mayi.ffi.MachineRecord
 import dev.mayi.ffi.PromptInfo
 import dev.mayi.ffi.RevealedSecret
 import dev.mayi.ffi.SecretRecord
@@ -854,15 +861,15 @@ private fun Secrets(
     }
 
     var query by rememberSaveable { mutableStateOf("") }
-    var folder by rememberSaveable { mutableStateOf<String?>(null) }
-    val folders = remember(state.secrets) { folders(state.secrets) }
-    // A folder emptied meanwhile shows everything again.
-    val selected = folder?.takeIf { it in folders }
+    var tag by rememberSaveable { mutableStateOf<String?>(null) }
+    val tags = remember(state.secrets) { tagsOf(state.secrets) }
+    // A tag dropped meanwhile shows everything again.
+    val selected = tag?.takeIf { it in tags }
     val shown = remember(state.secrets, query, selected) {
         val words = query.lowercase().split(' ').filter { it.isNotEmpty() }
         state.secrets.filter { secret ->
-            val text = (listOf(secret.name, secret.folder ?: "") + secret.sites + secret.fields).joinToString(" ").lowercase()
-            (selected == null || secret.folder == selected) && words.all { it in text }
+            val text = (listOf(secret.name) + secret.tags + secret.sites + secret.fields).joinToString(" ").lowercase()
+            (selected == null || secret.tags.any { it.equals(selected, ignoreCase = true) }) && words.all { it in text }
         }
     }
     val focus = LocalFocusManager.current
@@ -883,18 +890,18 @@ private fun Secrets(
                     keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
                 )
             }
-            if (folders.isNotEmpty()) {
-                item(key = "folders") {
+            if (tags.isNotEmpty()) {
+                item(key = "tags") {
                     Row(
                         Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        FilterChip(selected = selected == null, onClick = { folder = null }, label = { Text("All") })
-                        for (name in folders) {
+                        FilterChip(selected = selected == null, onClick = { tag = null }, label = { Text("All") })
+                        for (name in tags) {
                             FilterChip(
-                                selected = selected == name, onClick = { folder = if (selected == name) null else name },
+                                selected = selected == name, onClick = { tag = if (selected == name) null else name },
                                 label = { Text(name) },
-                                leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null, Modifier.size(FilterChipDefaults.IconSize)) },
+                                leadingIcon = { Icon(Icons.Outlined.Sell, contentDescription = null, Modifier.size(FilterChipDefaults.IconSize)) },
                             )
                         }
                     }
@@ -906,7 +913,7 @@ private fun Secrets(
             if (shown.isEmpty()) {
                 item {
                     Text(
-                        if (query.isEmpty()) "Nothing in $selected." else "No secret matches “${query.trim()}”" + (selected?.let { " in $it." } ?: "."),
+                        if (query.isEmpty()) "Nothing is tagged $selected." else "No secret matches “${query.trim()}”" + (selected?.let { " among those tagged $it." } ?: "."),
                         style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
                     )
@@ -963,8 +970,8 @@ private fun Secrets(
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
             AddSecret(
-                scan = scan, existing = null, onCancel = { setAdding(false) }, folders = folders, folder = selected,
-                controller = controller,
+                scan = scan, existing = null, onCancel = { setAdding(false) }, tagsInUse = tags, tag = selected,
+                usableBy = controller::usableBy, controller = controller,
             ) { draft, done ->
                 saveInBackground(controller, draft) { problem ->
                     if (problem == null) setAdding(false)
@@ -981,7 +988,7 @@ private fun Secrets(
             AddSecret(
                 scan = scan, existing = secret, onCancel = { editing = null },
                 reveal = { done -> reveal(secret, done) }, revealOnOpen = showing,
-                loadsAtOnce = app.unlocked && secret.level < 4u, folders = folders,
+                loadsAtOnce = app.unlocked && secret.level < 4u, tagsInUse = tags, usableBy = controller::usableBy,
                 onDismissRotation = { controller.dismissRotation(secret.name) },
             ) { draft, done ->
                 saveInBackground(controller, draft) { problem ->
@@ -1008,10 +1015,10 @@ private fun Secrets(
                     AwsSignInEditor(controller, secret) { detail = null }
                 }
                 if (secret.aws == null) Text(summary(secret) + ".", style = MaterialTheme.typography.bodyMedium)
-                secret.folder?.let { name ->
+                if (secret.tags.isNotEmpty()) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(Icons.Outlined.Folder, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
-                        Text("In $name", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
+                        Icon(Icons.Outlined.Sell, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                        Text("Tagged " + secret.tags.joinToString(", "), style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
                     }
                 }
                 if (secret.copies < 2u) {
@@ -1069,12 +1076,15 @@ private fun Secrets(
 /** What the add or edit sheet produces. [values] empty means keep the stored values. */
 private class NewSecret(
     val name: String, val level: UByte, val values: Map<String, String>, val allow: List<String>,
-    val maxGrantSecs: ULong, val login: Boolean, val sites: List<String>, val folder: String?,
+    val maxGrantSecs: ULong, val login: Boolean, val sites: List<String>, val tags: List<String>,
 )
 
-/** The folders in use, sorted. */
-private fun folders(secrets: List<SecretRecord>) =
-    secrets.mapNotNull { it.folder }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+/** The tags in use, sorted, each once whatever its case. */
+private fun tagsOf(secrets: List<SecretRecord>) =
+    secrets.flatMap { it.tags }.distinctBy { it.lowercase() }.sortedWith(String.CASE_INSENSITIVE_ORDER)
+
+/** "work, ci" as typed into the tags field. */
+private fun tagList(text: String) = text.split(',').map { it.trim() }.filter { it.isNotEmpty() }
 
 private fun lines(text: String) = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
@@ -1094,9 +1104,9 @@ private fun saveInBackground(controller: MayiController, draft: NewSecret, done:
 /** Stores a draft: new values, or only the rules when no value was entered. Blocks. */
 private fun save(controller: MayiController, draft: NewSecret): String? {
     val problem = if (draft.values.isEmpty()) {
-        controller.updateRules(draft.name, draft.allow, draft.maxGrantSecs, draft.sites, draft.folder)
+        controller.updateRules(draft.name, draft.allow, draft.maxGrantSecs, draft.sites, draft.tags)
     } else {
-        controller.saveSecret(draft.name, draft.level, draft.values, draft.allow, draft.maxGrantSecs, draft.login, draft.sites, draft.folder)
+        controller.saveSecret(draft.name, draft.level, draft.values, draft.allow, draft.maxGrantSecs, draft.login, draft.sites, draft.tags)
     }
     if (problem == null) Thread { controller.sync() }.start()
     return problem
@@ -1119,10 +1129,12 @@ private fun AddSecret(
     revealOnOpen: Boolean = false,
     /** Load the values when the sheet opens, hidden behind their eyes: when that asks nothing. */
     loadsAtOnce: Boolean = false,
-    /** The folders in use, offered as suggestions. */
-    folders: List<String> = emptyList(),
-    /** The folder a new secret starts in. */
-    folder: String? = null,
+    /** The tags in use, offered as suggestions. */
+    tagsInUse: List<String> = emptyList(),
+    /** The tag a new secret starts with. */
+    tag: String? = null,
+    /** Who could use a secret with this name and these tags, shown as they change. */
+    usableBy: ((String, List<String>) -> List<String>)? = null,
     /** Drops the note that this secret should be replaced; returns an error. */
     onDismissRotation: (() -> String?)? = null,
     /** When adding: offers an AWS sign-in as a third type. */
@@ -1143,7 +1155,7 @@ private fun AddSecret(
     var twoFactor by remember { mutableStateOf("") }
     var level by remember { mutableIntStateOf(existing?.level?.toInt() ?: 3) }
     var maxGrant by remember { mutableStateOf(existing?.maxGrantSecs ?: 900uL) }
-    var folderText by remember { mutableStateOf(existing?.folder ?: folder ?: "") }
+    var tagsText by remember { mutableStateOf(existing?.tags?.joinToString(", ") ?: tag ?: "") }
     var rotationDismissed by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scheme = MaterialTheme.colorScheme
@@ -1260,7 +1272,7 @@ private fun AddSecret(
                 }
             }
             if (aws && controller != null) {
-                AwsSignInForm(controller, folder, onCancel = onCancel, onDone = onCancel)
+                AwsSignInForm(controller, tag, onCancel = onCancel, onDone = onCancel)
                 return@Column
             }
             OutlinedTextField(
@@ -1270,15 +1282,29 @@ private fun AddSecret(
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             OutlinedTextField(
-                folderText, { folderText = it }, Modifier.fillMaxWidth(), label = { Text("Folder (optional)") }, singleLine = true,
-                leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
+                tagsText, { tagsText = it }, Modifier.fillMaxWidth(), label = { Text("Tags (optional)") }, singleLine = true,
+                placeholder = { Text("work, ci") },
+                leadingIcon = { Icon(Icons.Outlined.Sell, contentDescription = null) },
+                // A tag can let a machine use the secret, so say which ones would.
+                supportingText = usableBy?.let { find ->
+                    {
+                        val who = remember(name, tagsText) { find(name.trim(), tagList(tagsText)) }
+                        Text(if (who.isEmpty()) "No machine may use it" else "Usable by " + who.joinToString(", "))
+                    }
+                },
             )
-            // The folders in use that fit what is typed, one tap away.
-            val typed = folderText.trim()
-            val offered = folders.filter { it != typed && it.startsWith(typed, ignoreCase = true) }
+            // The tags in use that fit the one being typed, one tap away.
+            val chosen = tagList(tagsText)
+            val typing = tagsText.substringAfterLast(',').trim()
+            val offered = tagsInUse.filter { t -> chosen.none { it.equals(t, ignoreCase = true) } && t.startsWith(typing, ignoreCase = true) }
             if (offered.isNotEmpty()) {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (name in offered) SuggestionChip(onClick = { folderText = name }, label = { Text(name) })
+                    for (name in offered) {
+                        SuggestionChip(
+                            onClick = { tagsText = (tagList(tagsText.substringBeforeLast(',', "")) + name).joinToString(", ") + ", " },
+                            label = { Text(name) },
+                        )
+                    }
                 }
             }
         }
@@ -1420,7 +1446,7 @@ private fun AddSecret(
                             onSave(
                                 NewSecret(
                                     name.trim(), level.toUByte(), values, if (login) emptyList() else lines(allow), maxGrant, login,
-                                    if (login) lines(sites) else emptyList(), folderText.trim().ifEmpty { null },
+                                    if (login) lines(sites) else emptyList(), tagList(tagsText),
                                 ),
                             ) { problem ->
                                 saving = false
@@ -1581,10 +1607,170 @@ private fun AddDevice(
     }
 }
 
-/** An invitation for a machine to pair: a command to run there. */
+/** An ACL being edited: every secret, or chosen tags and secrets. */
+private data class AclDraft(val all: Boolean = false, val tags: Set<String> = emptySet(), val secrets: Set<String> = emptySet()) {
+    val record get() = AclRecord(all, tags.sortedWith(String.CASE_INSENSITIVE_ORDER), secrets.sorted())
+
+    /** Grants nothing, so there is nothing to save yet. */
+    val isEmpty get() = !all && tags.isEmpty() && secrets.isEmpty()
+
+    fun allows(secret: SecretRecord) =
+        all || secret.name in secrets || secret.tags.any { tag -> tags.any { it.equals(tag, ignoreCase = true) } }
+
+    companion object {
+        fun of(acl: AclRecord?) = AclDraft(acl?.all ?: false, acl?.tags?.toSet() ?: emptySet(), acl?.secrets?.toSet() ?: emptySet())
+    }
+}
+
+/** "all secrets", "#ci, #work, PROD_DB", or "nothing", for a machine's row. */
+private fun aclSummary(acl: AclRecord) =
+    if (acl.all) "all secrets" else (acl.tags.map { "#$it" } + acl.secrets).joinToString(", ").ifEmpty { "nothing" }
+
+/**
+ * Chooses which secrets a machine may use: every secret, whole tags, or
+ * single secrets. Nothing is ticked to start with for a new machine, and it
+ * cannot be confirmed until something is.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun AclSheet(
+    title: String, message: String, confirm: String, acl: AclRecord?, secrets: List<SecretRecord>,
+    onConfirm: (AclRecord) -> String?, onCancel: () -> Unit,
+) {
+    var draft by remember { mutableStateOf(AclDraft.of(acl)) }
+    var query by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    val tags = remember(secrets) { tagsOf(secrets) }
+    val scheme = MaterialTheme.colorScheme
+    // Rows on the sheet's own background.
+    val clear = ListItemDefaults.colors(containerColor = Color.Transparent)
+    val shown = remember(secrets, query) {
+        val words = query.lowercase().split(' ').filter { it.isNotEmpty() }
+        secrets.filter { secret -> (listOf(secret.name) + secret.tags).joinToString(" ").lowercase().let { text -> words.all { it in text } } }
+    }
+    val heading = @Composable { text: String ->
+        Text(
+            text, style = MaterialTheme.typography.titleSmall, color = scheme.primary,
+            modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 16.dp, bottom = 4.dp),
+        )
+    }
+    ModalBottomSheet(onDismissRequest = onCancel, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        LazyColumn(Modifier.weight(1f, fill = false)) {
+            item {
+                Column(Modifier.padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(title, style = MaterialTheme.typography.titleLarge)
+                    Text(message, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
+                }
+            }
+            item {
+                ListItem(
+                    colors = clear,
+                    headlineContent = { Text("All secrets") },
+                    supportingContent = { Text("Including ones added later") },
+                    trailingContent = { Switch(checked = draft.all, onCheckedChange = null) },
+                    modifier = Modifier.padding(horizontal = 8.dp)
+                        .toggleable(draft.all, role = Role.Switch) { draft = draft.copy(all = it) },
+                )
+            }
+            if (!draft.all) {
+                if (tags.isNotEmpty()) {
+                    item { heading("Tags") }
+                    items(tags, key = { "tag:$it" }) { tag ->
+                        val on = tag in draft.tags
+                        ListItem(
+                            colors = clear,
+                            leadingContent = { Checkbox(checked = on, onCheckedChange = null) },
+                            headlineContent = { Text(tag) },
+                            trailingContent = { Text("${secrets.count { s -> s.tags.any { it.equals(tag, ignoreCase = true) } }}") },
+                            modifier = Modifier.padding(horizontal = 8.dp).toggleable(on, role = Role.Checkbox) {
+                                draft = draft.copy(tags = if (it) draft.tags + tag else draft.tags - tag)
+                            },
+                        )
+                    }
+                    item {
+                        Text(
+                            "A tag covers the secrets that carry it now and any tagged later.",
+                            style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 24.dp),
+                        )
+                    }
+                }
+                item { heading("Secrets") }
+                if (secrets.isEmpty()) {
+                    item {
+                        Text(
+                            "No secrets yet. Choose All secrets, or add some first.",
+                            style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 24.dp),
+                        )
+                    }
+                } else if (secrets.size > 6) {
+                    item {
+                        OutlinedTextField(
+                            query, { query = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                            placeholder = { Text("Search secrets") }, singleLine = true, shape = CircleShape,
+                            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                        )
+                    }
+                }
+                items(shown, key = { "secret:${it.name}" }) { secret ->
+                    val on = secret.name in draft.secrets
+                    ListItem(
+                        colors = clear,
+                        leadingContent = { Checkbox(checked = on, onCheckedChange = null) },
+                        headlineContent = { Text(secret.name, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        // Granted through a tag already: no need to tick it.
+                        supportingContent = if (!on && draft.allows(secret)) ({ Text("Through a tag") }) else null,
+                        modifier = Modifier.padding(horizontal = 8.dp).toggleable(on, role = Role.Checkbox) {
+                            draft = draft.copy(secrets = if (it) draft.secrets + secret.name else draft.secrets - secret.name)
+                        },
+                    )
+                }
+            }
+        }
+        Column(Modifier.padding(horizontal = 24.dp).padding(top = 12.dp, bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = scheme.error) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (draft.all) "Can use every secret" else "Can use ${secrets.count(draft::allows)} of ${secrets.size}",
+                    style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant, modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onCancel) { Text("Cancel") }
+                Button(onClick = { error = onConfirm(draft.record) }, enabled = !draft.isEmpty) { Text(confirm) }
+            }
+        }
+    }
+}
+
+/**
+ * Pairs a machine: first what it may use, then an invitation, a command to
+ * run there.
+ */
+@Composable
 private fun PairMachine(app: MayiApp, controller: MayiController, state: MayiController.State, onClose: () -> Unit) {
+    var acl by remember { mutableStateOf<AclRecord?>(null) }
+    val chosen = acl
+    if (chosen == null) {
+        AclSheet(
+            title = "Pair a machine",
+            message = "Choose what the new machine may use. It is refused anything else, without asking you.",
+            confirm = "Next", acl = null, secrets = state.secrets,
+            onConfirm = {
+                acl = it
+                null
+            },
+            onCancel = onClose,
+        )
+    } else {
+        PairingInvitation(app, controller, state, chosen, onClose)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PairingInvitation(
+    app: MayiApp, controller: MayiController, state: MayiController.State, acl: AclRecord, onClose: () -> Unit,
+) {
     var token by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     DisposableEffect(Unit) {
@@ -1592,7 +1778,7 @@ private fun PairMachine(app: MayiApp, controller: MayiController, state: MayiCon
             if (!app.unlock("Allow another machine to request secrets")) {
                 error = "Pairing needs your fingerprint."
             } else {
-                controller.startPairing(600u).onSuccess { token = it }.onFailure { error = it.message }
+                controller.startPairing(600u, acl).onSuccess { token = it }.onFailure { error = it.message }
             }
         }.start()
         onDispose { controller.cancelInvitation() }
@@ -1615,6 +1801,10 @@ private fun PairMachine(app: MayiApp, controller: MayiController, state: MayiCon
                     CodeToPass("mayi pair $it", "Mayi pairing", qr = false)
                     LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
+                Text(
+                    "It may use: " + aclSummary(acl) + ".",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
             Row {
@@ -1668,10 +1858,45 @@ private fun Devices(
     var recoveryKey by remember { mutableStateOf<String?>(null) }
     var confirmJoin by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    /** The machine, or the device whose agents, whose ACL is being edited. */
+    var editingAcl by remember { mutableStateOf<Any?>(null) }
+    // Agents on a vault device have one ACL, kept with that device; the
+    // machine record it paired through is that same list, so it is not shown.
+    val agentDevices = state.devices.filter { it.agentsAcl != null && !it.removed }
+    val paired = state.machines.filter { it.runsDevice == null }
 
     if (adding) AddDevice(app, controller, state, scan) { setAdding(false) }
     if (pairing) PairMachine(app, controller, state) { pairing = false }
     recoveryKey?.let { RecoveryKey(it) { recoveryKey = null } }
+    when (val target = editingAcl) {
+        is MachineRecord -> AclSheet(
+            title = "ACL for ${target.name}", message = "What this machine may use. It is refused anything else, without asking you.",
+            confirm = "Save", acl = target.acl, secrets = state.secrets,
+            onConfirm = { acl ->
+                controller.setMachineAcl(target.id, acl).also {
+                    if (it == null) {
+                        editingAcl = null
+                        Thread { controller.sync() }.start()
+                    }
+                }
+            },
+            onCancel = { editingAcl = null },
+        )
+        is DeviceInfo -> AclSheet(
+            title = "ACL for agents on ${target.name}",
+            message = "What the agents on that Mac may use, through Mayi there and from your other devices.",
+            confirm = "Save", acl = target.agentsAcl, secrets = state.secrets,
+            onConfirm = { acl ->
+                controller.setAgentsAcl(target.id, acl).also {
+                    if (it == null) {
+                        editingAcl = null
+                        Thread { controller.sync() }.start()
+                    }
+                }
+            },
+            onCancel = { editingAcl = null },
+        )
+    }
 
     LazyColumn {
         if (controller.vaultIsEmpty) {
@@ -1758,23 +1983,39 @@ private fun Devices(
                 TextButton(onClick = { pairing = true }) { Text("Pair a machine") }
             }
         }
-        if (state.machines.isEmpty()) {
+        items(agentDevices, key = { "agents:" + it.id }) { device ->
+            ListItem(
+                leadingContent = { Icon(Icons.Outlined.Laptop, contentDescription = null) },
+                headlineContent = { Text("Agents on ${device.name}") },
+                supportingContent = {
+                    Column {
+                        Text("Through Mayi on that Mac, and from there on your other devices")
+                        device.agentsAcl?.let { AclLine(it) }
+                    }
+                },
+                modifier = Modifier.clickable { editingAcl = device },
+            )
+        }
+        if (paired.isEmpty()) {
             item {
                 Text(
-                    "None yet. A paired machine, such as a server or a VM running agents, asks this vault for secrets and stores none.",
+                    "No paired machine yet. A paired machine, such as a server or a VM running agents, asks this vault for secrets and stores none.",
                     style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }
         }
-        items(state.machines, key = { it.id }) { machine ->
+        items(paired, key = { it.id }) { machine ->
             ListItem(
                 leadingContent = { Icon(Icons.Outlined.Dns, contentDescription = null) },
                 headlineContent = { Text(machine.name) },
                 supportingContent = {
-                    // A machine that holds a vault device and paired itself through it.
-                    Text(machine.runsDevice?.let { "Agents on $it. Key ${machine.id.take(8)}" } ?: "Key ${machine.id.take(8)}")
+                    Column {
+                        Text("Key ${machine.id.take(8)}")
+                        if (!machine.revoked) AclLine(machine.acl)
+                    }
                 },
+                modifier = if (machine.revoked) Modifier else Modifier.clickable { editingAcl = machine },
                 trailingContent = {
                     if (machine.revoked) {
                         Text("Revoked", color = scheme.error)
@@ -1830,6 +2071,15 @@ private fun Devices(
             dismissButton = { TextButton(onClick = { confirmJoin = false }) { Text("Cancel") } },
         )
     }
+}
+
+/** "ACL: #ci, PROD_DB" under a machine; stronger when it is limited. */
+@Composable
+private fun AclLine(acl: AclRecord) {
+    Text(
+        "ACL: " + aclSummary(acl), maxLines = 2, overflow = TextOverflow.Ellipsis,
+        color = if (acl.all) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+    )
 }
 
 // --- Activity ---------------------------------------------------------------------

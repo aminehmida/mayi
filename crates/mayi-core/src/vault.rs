@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 
 use crate::crypto::{self, Key};
 use crate::hardware::HardwareKeys;
-use crate::model::{AwsProfile, AwsSignIn, Destination, ItemMeta, Level, NewItem, RotateNote, SecretValues, Source};
+use crate::model::{Acl, AwsProfile, AwsSignIn, Destination, ItemMeta, Level, NewItem, RotateNote, SecretValues, Source};
 use crate::provider::{self, NEEDS_NEWER};
 use crate::{now_ms, Error, Result};
 
@@ -140,9 +140,17 @@ pub(crate) fn log_aad(author: &str, seq: u64) -> Vec<u8> {
     format!("mayi/log/{author}/{seq}").into_bytes()
 }
 
-/// A folder name as kept: trimmed, and none when empty.
-fn clean_folder(folder: Option<String>) -> Option<String> {
-    folder.map(|f| f.trim().to_string()).filter(|f| !f.is_empty())
+/// Tags as kept: trimmed, without empty ones or repeats (letter case aside),
+/// sorted.
+fn clean_tags(tags: Vec<String>) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for tag in tags.into_iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        if !kept.iter().any(|k| k.eq_ignore_ascii_case(&tag)) {
+            kept.push(tag);
+        }
+    }
+    kept.sort_by_key(|t| t.to_lowercase());
+    kept
 }
 
 /// A device holding this vault. Keys are hex.
@@ -167,6 +175,11 @@ pub struct DeviceRecord {
     /// like a device, and never connects.
     #[serde(default)]
     pub recovery: bool,
+    /// For a device that serves agents on its own machine (the Mac app),
+    /// the secrets they may use: on its socket, and through its machine's
+    /// requester on the other devices. None for a device with no agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Acl>,
     #[serde(skip)]
     pub version: u64,
 }
@@ -203,9 +216,13 @@ pub struct RequesterRecord {
     pub added_ms: u64,
     pub revoked: bool,
     /// The device whose machine this is, when it enrolled itself through
-    /// that device's local socket rather than by pairing.
+    /// that device's local socket rather than by pairing. Its ACL is that
+    /// device's agents' ACL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_to: Option<String>,
+    /// The secrets it may use, chosen when it was paired.
+    #[serde(default)]
+    pub acl: Acl,
 }
 
 impl RequesterRecord {
@@ -364,6 +381,7 @@ impl Vault {
             addresses: vec![],
             removed: false,
             recovery: false,
+            agents: None,
             version: 0,
         };
         let conn = vault.conn();
@@ -405,6 +423,7 @@ impl Vault {
             addresses: vec![],
             removed: false,
             recovery: false,
+            agents: None,
             version: 0,
         };
         let conn = vault.conn();
@@ -543,7 +562,7 @@ impl Vault {
             destination: new.destination,
             source: Source::Stored,
             sites,
-            folder: clean_folder(new.folder),
+            tags: clean_tags(new.tags),
             // A new value: whoever saw the old one no longer matters.
             rotate: Vec::new(),
             aws: None,
@@ -626,7 +645,7 @@ impl Vault {
     /// Saves a new AWS sign-in: the session (`aws::Session::values`) as its
     /// values, the portal and profiles in its metadata. The sign-in itself
     /// is stored like a level 1 to 3 secret; each profile has its own level.
-    pub fn put_aws(&self, name: &str, aws: AwsSignIn, values: SecretValues, folder: Option<String>) -> Result<ItemMeta> {
+    pub fn put_aws(&self, name: &str, aws: AwsSignIn, values: SecretValues, tags: Vec<String>) -> Result<ItemMeta> {
         validate_name(name)?;
         crate::aws::check_profiles(&aws.profiles).map_err(Error::Vault)?;
         crate::aws::Session::from_values(&values).map_err(Error::Vault)?;
@@ -643,7 +662,7 @@ impl Vault {
             destination: Destination::Command,
             source: Source::AwsSso,
             sites: vec![],
-            folder: clean_folder(folder),
+            tags: clean_tags(tags),
             rotate: vec![],
             aws: Some(aws),
             unknown_fields: BTreeMap::new(),
@@ -705,7 +724,7 @@ impl Vault {
         allow: Vec<String>,
         max_grant_secs: u64,
         sites: Vec<String>,
-        folder: Option<String>,
+        tags: Vec<String>,
     ) -> Result<ItemMeta> {
         let mut meta = self.meta(name)?;
         provider::check_known(&meta).map_err(Error::Vault)?;
@@ -722,7 +741,7 @@ impl Vault {
         meta.sites = sites;
         meta.allow = allow;
         meta.max_grant_secs = max_grant_secs;
-        meta.folder = clean_folder(folder);
+        meta.tags = clean_tags(tags);
         self.write_meta(meta)
     }
 
@@ -961,6 +980,7 @@ impl Vault {
             addresses: vec![],
             removed: false,
             recovery: new.noise_public.is_none(),
+            agents: None,
             version: 0,
         };
         let mut conn = self.conn();
@@ -1123,8 +1143,11 @@ impl Vault {
 
     /// Enrols a machine by its static key. Pairing the same key again
     /// renames it and lifts a revocation.
-    pub fn add_requester(&self, name: &str, public: [u8; 32]) -> Result<RequesterRecord> {
-        self.enrol_requester(name, public, None)
+    pub fn add_requester(&self, name: &str, public: [u8; 32], acl: Acl) -> Result<RequesterRecord> {
+        let mut record = self.enrol_requester(name, public, None)?;
+        record.acl = acl;
+        self.put_requester(&record)?;
+        Ok(record)
     }
 
     /// Enrols the machine this device runs on, so that requests made on it
@@ -1141,9 +1164,93 @@ impl Vault {
             added_ms: now_ms(),
             revoked: false,
             local_to,
+            acl: Acl::default(),
         };
         self.put_requester(&record)?;
         Ok(record)
+    }
+
+    // --- ACLs --------------------------------------------------------------
+
+    /// Changes which secrets a paired machine may use.
+    pub fn set_requester_acl(&self, id: &str, acl: Acl) -> Result<()> {
+        let mut record = self
+            .requesters()?
+            .into_iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| Error::Vault(format!("no machine with id {id}")))?;
+        record.acl = acl;
+        self.put_requester(&record)
+    }
+
+    /// The ACL of the agents on this device's machine, who ask through its
+    /// local socket. The first time it serves them it grants everything.
+    pub fn agents_acl_here(&self) -> Result<Acl> {
+        let mut record = self.this_device()?;
+        if let Some(acl) = &record.agents {
+            return Ok(acl.clone());
+        }
+        record.agents = Some(Acl::everything());
+        self.save_device(&record)?;
+        Ok(Acl::everything())
+    }
+
+    /// Changes which secrets the agents on a device's machine may use.
+    pub fn set_agents_acl(&self, device_id: &str, acl: Acl) -> Result<()> {
+        let mut record = self
+            .devices()?
+            .into_iter()
+            .find(|d| d.id == device_id)
+            .ok_or_else(|| Error::Vault(format!("no device with id {device_id}")))?;
+        record.agents = Some(acl);
+        self.save_device(&record)
+    }
+
+    /// The ACL a machine's requests are checked against.
+    pub fn acl_for(&self, record: &RequesterRecord) -> Result<Acl> {
+        match &record.local_to {
+            None => Ok(record.acl.clone()),
+            Some(device) => Ok(self
+                .devices()?
+                .into_iter()
+                .find(|d| &d.id == device)
+                .and_then(|d| d.agents)
+                .unwrap_or_else(Acl::everything)),
+        }
+    }
+
+    /// Who could use a secret called `name` with these tags: the paired
+    /// machines (not revoked) and the agents of each device that has them.
+    pub fn usable_by(&self, name: &str, tags: &[String]) -> Result<Vec<String>> {
+        let probe = ItemMeta {
+            id: String::new(),
+            name: name.to_string(),
+            level: Level::Approve,
+            allow: Vec::new(),
+            max_grant_secs: 0,
+            fields: Vec::new(),
+            destination: Destination::Command,
+            source: Source::Stored,
+            sites: Vec::new(),
+            tags: clean_tags(tags.to_vec()),
+            rotate: Vec::new(),
+            aws: None,
+            unknown_fields: BTreeMap::new(),
+            version: 0,
+        };
+        let mut who: Vec<String> = self
+            .devices()?
+            .into_iter()
+            .filter(|d| !d.removed && d.agents.as_ref().is_some_and(|acl| acl.allows(&probe)))
+            .map(|d| format!("Agents on {}", d.name))
+            .collect();
+        who.extend(
+            self.requesters()?
+                .into_iter()
+                .filter(|r| !r.revoked && r.local_to.is_none() && r.acl.allows(&probe))
+                .map(|r| r.name),
+        );
+        Ok(who)
     }
 
     /// Revokes the machines that enrolled themselves through this device's
@@ -1407,7 +1514,7 @@ mod tests {
             max_grant_secs: 600,
             destination: Destination::Command,
             sites: vec![],
-            folder: None,
+            tags: vec![],
         }
     }
 
@@ -1420,12 +1527,44 @@ mod tests {
             max_grant_secs: 600,
             destination: Destination::Website,
             sites: sites.iter().map(|s| s.to_string()).collect(),
-            folder: None,
+            tags: vec![],
         }
     }
 
     fn vault(dir: &tempfile::TempDir) -> Vault {
         Vault::create(&dir.path().join("v.db"), Arc::new(SoftwareKeys::generate(|_| true)), "test").unwrap()
+    }
+
+    /// Tags are kept tidy, and the editor's "usable by" follows the ACLs of
+    /// the machines and of each device's agents.
+    #[test]
+    fn tags_and_who_may_use_a_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault(&dir);
+        let mut new = item("CI_TOKEN", Level::Approve, "x");
+        new.tags = vec![" ci ".into(), "CI".into(), "".into(), "Build".into()];
+        assert_eq!(vault.put(new).unwrap().tags, ["Build", "ci"]);
+
+        let ci = vault.add_requester("build-vm", [1u8; 32], Acl { tags: vec!["ci".into()], ..Acl::default() }).unwrap();
+        vault.add_requester("laptop", [2u8; 32], Acl { secrets: vec!["PROD_DB".into()], ..Acl::default() }).unwrap();
+        let revoked = vault.add_requester("old", [3u8; 32], Acl::everything()).unwrap();
+        vault.revoke_requester(&revoked.id).unwrap();
+        assert_eq!(vault.usable_by("CI_TOKEN", &["ci".into()]).unwrap(), ["build-vm"]);
+        assert_eq!(vault.usable_by("PROD_DB", &[]).unwrap(), ["laptop"]);
+        assert!(vault.usable_by("OTHER", &["personal".into()]).unwrap().is_empty());
+
+        // A device's agents: everything the first time it serves them, and
+        // its machine's requester is held to the same list.
+        assert_eq!(vault.agents_acl_here().unwrap(), Acl::everything());
+        assert_eq!(vault.usable_by("OTHER", &[]).unwrap(), ["Agents on test"]);
+        let mac = vault.add_local_requester("macbook", [4u8; 32]).unwrap();
+        let only_ci = Acl { tags: vec!["ci".into()], ..Acl::default() };
+        vault.set_agents_acl(vault.device_id(), only_ci.clone()).unwrap();
+        assert_eq!(vault.acl_for(&mac).unwrap(), only_ci);
+        assert_eq!(vault.agents_acl_here().unwrap(), only_ci);
+
+        vault.set_requester_acl(&ci.id, Acl::default()).unwrap();
+        assert_eq!(vault.usable_by("CI_TOKEN", &["ci".into()]).unwrap(), ["Agents on test"]);
     }
 
     #[test]
@@ -1530,7 +1669,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault = vault(&dir);
         let first = vault.put(item("TOKEN", Level::Biometric, "x")).unwrap();
-        let meta = vault.update_rules("TOKEN", vec!["make *".into()], 60, vec![], Some(" Work ".into())).unwrap();
+        let meta = vault.update_rules("TOKEN", vec!["make *".into()], 60, vec![], vec![" Work ".into()]).unwrap();
         assert!(meta.version > first.version);
         assert_eq!(meta.max_grant_secs, 60);
         let stored = vault.meta("TOKEN").unwrap();
@@ -1587,12 +1726,12 @@ mod tests {
         }
 
         // Websites change without the values, and stay checked.
-        let moved = vault.update_rules("github", vec![], 60, vec!["gitlab.com".into()], None).unwrap();
+        let moved = vault.update_rules("github", vec![], 60, vec!["gitlab.com".into()], vec![]).unwrap();
         assert_eq!(moved.sites, ["gitlab.com"]);
-        assert!(vault.update_rules("github", vec![], 60, vec![], None).is_err());
-        assert!(vault.update_rules("github", vec!["x".into()], 60, vec!["a.com".into()], None).is_err());
+        assert!(vault.update_rules("github", vec![], 60, vec![], vec![]).is_err());
+        assert!(vault.update_rules("github", vec!["x".into()], 60, vec!["a.com".into()], vec![]).is_err());
         vault.put(item("TOKEN", Level::Log, "x")).unwrap();
-        assert!(vault.update_rules("TOKEN", vec![], 60, vec!["a.com".into()], None).is_err());
+        assert!(vault.update_rules("TOKEN", vec![], 60, vec!["a.com".into()], vec![]).is_err());
     }
 
     #[test]
@@ -1629,7 +1768,7 @@ mod tests {
             let meta = vault.meta(name).unwrap();
             let refused = vault.reveal(&[&meta], "p").err().map(|e| e.to_string()).unwrap_or_default();
             assert!(refused.contains("newer version of Mayi"), "{name}: {refused}");
-            assert!(vault.update_rules(name, vec![], 60, vec![], None).is_err(), "{name}");
+            assert!(vault.update_rules(name, vec![], 60, vec![], vec![]).is_err(), "{name}");
 
             // Rotation warnings still apply, and keep what this version does not know.
             let note = RotateNote { who: "old-vm".into(), why: "revoked".into(), at_ms: 1 };
@@ -1663,11 +1802,11 @@ mod tests {
         assert_eq!(count(), 0, "new, and raised: nothing asked");
         vault.put(item("TOKEN", Level::Notify, "c")).unwrap();
         assert_eq!(count(), 1, "lowered");
-        vault.update_rules("TOKEN", vec!["make *".into()], 600, vec![], None).unwrap();
+        vault.update_rules("TOKEN", vec!["make *".into()], 600, vec![], vec![]).unwrap();
         assert_eq!(count(), 2, "an expected command added");
-        vault.update_rules("TOKEN", vec![], 60, vec![], Some("Work".into())).unwrap();
-        assert_eq!(count(), 2, "removing and moving ask nothing");
-        vault.update_rules("TOKEN", vec![], 3600, vec![], None).unwrap();
+        vault.update_rules("TOKEN", vec![], 60, vec![], vec!["Work".into()]).unwrap();
+        assert_eq!(count(), 2, "removing and tagging ask nothing");
+        vault.update_rules("TOKEN", vec![], 3600, vec![], vec![]).unwrap();
         assert_eq!(count(), 3, "a longer grant");
 
         let dir = tempfile::tempdir().unwrap();
@@ -1677,7 +1816,7 @@ mod tests {
         let meta = vault.meta("TOKEN").unwrap();
         assert_eq!(meta.level, Level::Approve, "unchanged when refused");
         assert_eq!(&**vault.reveal(&[&meta], "").unwrap()[0].get("value").unwrap(), "a");
-        assert!(vault.update_rules("TOKEN", vec!["*".into()], 600, vec![], None).is_err());
+        assert!(vault.update_rules("TOKEN", vec!["*".into()], 600, vec![], vec![]).is_err());
     }
 
     fn aws_sign_in(vault: &Vault) -> ItemMeta {
@@ -1689,7 +1828,7 @@ mod tests {
             .unwrap();
         let profiles = suggest_profiles(&session.accounts(&api).unwrap());
         let aws = AwsSignIn { start_url: session.start_url.clone(), region: "eu-west-3".into(), profiles };
-        vault.put_aws("mawaqit", aws, session.values(), None).unwrap()
+        vault.put_aws("mawaqit", aws, session.values(), vec![]).unwrap()
     }
 
     #[test]
@@ -1717,7 +1856,7 @@ mod tests {
 
         // Not a plain secret, and not to be turned into one.
         assert!(vault.put(item("mawaqit", Level::Log, "x")).is_err());
-        assert!(vault.update_rules("mawaqit", vec!["aws *".into()], 600, vec![], None).is_err());
+        assert!(vault.update_rules("mawaqit", vec!["aws *".into()], 600, vec![], vec![]).is_err());
         assert!(vault.update_aws_profiles("TOKEN", vec![]).is_err());
         let mut bad = profiles.clone();
         bad[0].name = bad[1].name.clone();
@@ -1749,7 +1888,7 @@ mod tests {
         let vault = Vault::create(&path, Arc::new(keys), "mac").unwrap();
         assert_eq!(vault.device_name().unwrap(), "mac");
         let (private, public) = vault.noise_keypair().unwrap();
-        let machine = vault.add_requester("build-vm", [5u8; 32]).unwrap();
+        let machine = vault.add_requester("build-vm", [5u8; 32], Acl::everything()).unwrap();
         assert_eq!(machine.label(), format!("build-vm ({})", &machine.id[..8]));
         assert!(vault.requester_by_key(&[5u8; 32]).unwrap().is_some());
         assert!(vault.requester_by_key(&[6u8; 32]).unwrap().is_none());
@@ -1776,7 +1915,7 @@ mod tests {
         let (private2, public2) = vault.noise_keypair().unwrap();
         assert_eq!((&*private, public), (&*private2, public2), "the tunnel key is stable");
         // Pairing the same key again lifts the revocation.
-        vault.add_requester("build-vm", [5u8; 32]).unwrap();
+        vault.add_requester("build-vm", [5u8; 32], Acl::everything()).unwrap();
         assert!(vault.requester_by_key(&[5u8; 32]).unwrap().is_some());
     }
 
@@ -1879,7 +2018,7 @@ mod tests {
         assert_eq!(vault.remove_device(&bootstrap.device_id).unwrap(), Some(vec!["BEFORE".to_string(), "L1".to_string()]));
         assert_eq!(vault.remove_device("nope").unwrap(), None);
 
-        let machine = vault.add_requester("vm", [2u8; 32]).unwrap();
+        let machine = vault.add_requester("vm", [2u8; 32], Acl::everything()).unwrap();
         for (name, outcome, requester) in [
             ("L1", "released", machine.label()),
             ("L1", "released", machine.label()),

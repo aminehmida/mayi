@@ -179,7 +179,7 @@ import Testing
         for secret in model.secrets {
             _ = try await model.revealSecret(secret).get()
         }
-        #expect(await model.startPairing() == nil)
+        #expect(await model.startPairing(acl: AclRecord(all: true, tags: [], secrets: [])) == nil)
         #expect(presence.count == 1, "one confirmation covers every value and the pairing")
         model.lock()
         _ = try await model.revealSecret(try #require(model.secrets.first)).get()

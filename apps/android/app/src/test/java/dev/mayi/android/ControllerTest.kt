@@ -1,5 +1,6 @@
 package dev.mayi.android
 
+import dev.mayi.ffi.AclRecord
 import dev.mayi.ffi.ApprovalChoice
 import dev.mayi.ffi.KeyException
 import dev.mayi.ffi.JoinInvitation
@@ -44,6 +45,8 @@ class ControllerTest {
     }
 
     private class Result(val status: Int, val out: String, val err: String)
+
+    private val everything = AclRecord(all = true, tags = emptyList(), secrets = emptyList())
 
     private val dir: File = Files.createTempDirectory("mayi").toFile()
 
@@ -94,7 +97,7 @@ class ControllerTest {
         for (level in 1..4) {
             assertNull(controller.saveSecret("L$level", level.toUByte(), mapOf("value" to "secret-$level"), emptyList(), 600u))
         }
-        val token = controller.device!!.startPairing(listOf("127.0.0.1"), 60u)
+        val token = controller.device!!.startPairing(listOf("127.0.0.1"), 60u, everything)
         assertEquals("Paired with phone as vm.\n", mayi("pair", token, "--name", "vm").out)
         eventually("the machine to be listed") { controller.state.machines.map { it.name } == listOf("vm") }
 
@@ -102,7 +105,6 @@ class ControllerTest {
         val one = mayi("run", "-s", "L1", "-r", "kotlin", "--", "sh", "-c", "echo \$L1")
         assertEquals("[masked]\n", one.out)
         eventually("the notice to clear") { controller.state.notices.isEmpty() }
-        // The log is reloaded just after the notice goes.
         eventually("the request to be logged") {
             controller.state.log.any { it.event == "request" && it.remote && it.requester.startsWith("vm (") }
         }
@@ -150,7 +152,7 @@ class ControllerTest {
         assertEquals(listOf("github.com"), saved.sites)
         assertTrue(controller.saveSecret("bad", 3u, mapOf("password" to "pw"), emptyList(), 0u, login = true)!!.contains("website"))
 
-        val token = controller.device!!.startPairing(listOf("127.0.0.1"), 60u)
+        val token = controller.device!!.startPairing(listOf("127.0.0.1"), 60u, everything)
         mayi("pair", token, "--name", "vm")
         val listed = mayi("list").out
         assertTrue(listed, listed.contains("github\tlevel 3\tpassword,totp,username\tlogin for github.com"))
@@ -206,7 +208,7 @@ class ControllerTest {
         assertEquals("view", phone.state.log.last().event)
 
         // Pairing a machine from the phone.
-        val token = phone.startPairing(60u).getOrThrow()
+        val token = phone.startPairing(60u, everything).getOrThrow()
         assertEquals("Paired with phone as vm.\n", mayi("pair", token, "--name", "vm").out)
         eventually("the pairing to show") { phone.state.lastPaired == "vm" }
 
@@ -234,16 +236,49 @@ class ControllerTest {
     }
 
     @Test
-    fun foldersAreKeptWithTheRules() {
+    fun tagsAreKeptWithTheRules() {
         val (phone, _) = phone(TestKeys())
-        assertNull(phone.saveSecret("TOKEN", 3u, mapOf("value" to "abc"), emptyList(), 900u, folder = " Work "))
-        assertEquals("Work", phone.state.secrets.single().folder)
-        // Changing only the rules moves it, and an empty folder means none.
-        assertNull(phone.updateRules("TOKEN", emptyList(), 900u, emptyList(), "Personal"))
-        assertEquals("Personal", phone.state.secrets.single().folder)
-        assertNull(phone.updateRules("TOKEN", emptyList(), 900u, emptyList(), ""))
-        assertNull(phone.state.secrets.single().folder)
+        assertNull(phone.saveSecret("TOKEN", 3u, mapOf("value" to "abc"), emptyList(), 900u, tags = listOf(" work ", "", "CI", "Work")))
+        assertEquals(listOf("CI", "work"), phone.state.secrets.single().tags)
+        // Changing only the rules retags it, and no tags is fine.
+        assertNull(phone.updateRules("TOKEN", emptyList(), 900u, emptyList(), listOf("personal")))
+        assertEquals(listOf("personal"), phone.state.secrets.single().tags)
+        assertNull(phone.updateRules("TOKEN", emptyList(), 900u, emptyList()))
+        assertTrue(phone.state.secrets.single().tags.isEmpty())
         assertEquals("abc", phone.reveal("TOKEN").getOrThrow().fields.single().value)
+    }
+
+    @Test
+    fun aMachineUsesOnlyWhatItsAclAllows() {
+        val (phone, _) = phone(TestKeys())
+        assertNull(phone.saveSecret("CI_TOKEN", 1u, mapOf("value" to "ci-token-value"), emptyList(), 0u, tags = listOf("ci")))
+        assertNull(phone.saveSecret("PROD_DB", 3u, mapOf("value" to "prod-db-value"), emptyList(), 0u))
+        val token = phone.startPairing(60u, AclRecord(all = false, tags = listOf("ci"), secrets = emptyList())).getOrThrow()
+        mayi("pair", token, "--name", "vm")
+        eventually("the machine to be listed") { phone.state.machines.map { it.name } == listOf("vm") }
+        val machine = phone.state.machines.single()
+        assertEquals(listOf("ci"), machine.acl.tags)
+
+        // It sees and uses only what its ACL allows; the rest is refused
+        // without asking, and logged.
+        assertTrue(mayi("list").out.startsWith("CI_TOKEN\t"))
+        assertFalse(mayi("list").out.contains("PROD_DB"))
+        assertEquals("[masked]\n", mayi("run", "-s", "CI_TOKEN", "-r", "kotlin", "--", "sh", "-c", "echo \$CI_TOKEN").out)
+        val refused = mayi("run", "-s", "PROD_DB", "-r", "kotlin", "--", "true")
+        assertEquals(77, refused.status)
+        assertTrue(refused.err, refused.err.contains("PROD_DB is not in this machine's ACL"))
+        assertTrue("nobody was asked", phone.state.pending.isEmpty())
+        eventually("the refusal to be logged") { phone.state.log.any { it.outcome == "denied: PROD_DB is not in this machine's ACL" } }
+
+        // The editor says who could use a secret with these tags.
+        assertEquals(listOf("vm"), phone.usableBy("NEW", listOf("CI")))
+        assertTrue(phone.usableBy("PROD_DB", emptyList()).isEmpty())
+
+        // Changing the ACL takes effect at once.
+        assertNull(phone.setMachineAcl(machine.id, AclRecord(all = false, tags = emptyList(), secrets = listOf("PROD_DB"))))
+        assertEquals(listOf("PROD_DB"), phone.state.machines.single().acl.secrets)
+        assertTrue(mayi("list").out.startsWith("PROD_DB\t"))
+        assertEquals(77, mayi("run", "-s", "CI_TOKEN", "-r", "kotlin", "--", "true").status)
     }
 
     @Test

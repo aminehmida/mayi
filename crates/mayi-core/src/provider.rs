@@ -161,7 +161,7 @@ mod tests {
             destination: Destination::Command,
             source: Source::Stored,
             sites: vec![],
-            folder: None,
+            tags: vec![],
             rotate: vec![],
             aws: None,
             unknown_fields: Default::default(),

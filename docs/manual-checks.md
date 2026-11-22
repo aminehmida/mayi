@@ -362,6 +362,33 @@ tests. Still to do by hand, against a real portal:
 - [ ] Running `aws sso login` again shows a warning on the sign-in, and
       Remove deletes the file.
 
+## ACLs and tags
+
+Automated tests cover the ACL check (all, a tag in any case, a name,
+nothing), a refused request that asks nobody and is logged, `mayi list`
+filtered, pairing that stores the invitation's ACL, an ACL change that syncs
+and is enforced by the other device, the agents' ACL on the local socket and
+for a Mac's requester on the phone, "Usable by", and tags cleaned and kept
+through rule changes, in Rust, Swift and on the JVM, with the real `mayi`. On
+the emulator: tag chips and the tags field with "Usable by", the ACL sheet
+("Through a tag", "Can use 1 of 2"), pairing a machine with only `ci` (its
+`mayi list` showed only the tagged secret), editing that ACL on the phone
+(the CLI then saw only the new secret and was refused the old one with exit
+77, no prompt), and the refusal appearing in Activity at once. On the Mac,
+snapshots of the ACL editor, the Machines rows and the editor's "Usable by".
+Still to do by hand:
+
+- [ ] Pair a machine from the Mac with only a tag: Pair a Machine asks for the
+      ACL first and cannot continue until something is chosen. On that
+      machine, `mayi list` shows only the tagged secrets, and asking for
+      another is refused at once, with nothing shown on the Mac or the phone.
+- [ ] Edit that ACL on the phone: after a sync, the Mac enforces the new list.
+- [ ] Machines on the Mac and Devices on the phone show "Agents on <your
+      Mac>" with its ACL. Narrow it, and Claude Code on the Mac is refused a
+      secret outside it, through the app and through the phone.
+- [ ] Tagging a secret updates "Usable by" in the editor before you save.
+- [ ] A refused request appears in Activity on the Mac with its window open.
+
 ## Decisions waiting for you
 
 - [x] The repository `aminehmida/mayi` is public.

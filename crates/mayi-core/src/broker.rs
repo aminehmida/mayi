@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::aws::{self, AwsProvider};
 use crate::grants::{Grant, GrantScope, GrantStore};
-use crate::model::{AwsProfile, Destination, ItemMeta, Level, SecretValues, Source};
+use crate::model::{Acl, AwsProfile, Destination, ItemMeta, Level, SecretValues, Source};
 use crate::policy::{self, Ctx, Rules, Verdict, Via};
 use crate::provider::{self, Provider, Refusal, Release};
 use crate::vault::{AuditEntry, SecretUse, Vault};
@@ -27,6 +27,9 @@ pub const WITHDRAWN: &str = "withdrawn: answered on another device, or the agent
 pub struct Requester {
     pub id: String,
     pub remote: bool,
+    /// The secrets it may ask for, from its record (or, for the agents on a
+    /// vault device's machine, that device's).
+    pub acl: Acl,
 }
 
 pub struct PromptSecret {
@@ -113,6 +116,9 @@ pub trait Ui: Send + Sync {
     fn sign_in(&self, _needed: &SignInNeeded) -> bool {
         false
     }
+    /// An entry was added to the audit log, including a request refused
+    /// without asking anyone: an Activity view can reload.
+    fn logged(&self) {}
 }
 
 pub enum Outcome {
@@ -238,12 +244,14 @@ impl Broker {
         }
     }
 
-    /// Names, levels and field names. Never values.
-    pub fn list(&self) -> crate::Result<Vec<SecretInfo>> {
+    /// Names, levels and field names of the secrets `requester` may use.
+    /// Never values.
+    pub fn list(&self, requester: &Requester) -> crate::Result<Vec<SecretInfo>> {
         Ok(self
             .vault
             .list()?
             .into_iter()
+            .filter(|m| requester.acl.allows(m))
             .map(|m| SecretInfo {
                 name: m.name,
                 level: m.level as u8,
@@ -348,7 +356,7 @@ impl Broker {
             Ok(_) => "released".into(),
             Err(reason) => format!("denied: {reason}"),
         };
-        if let Err(e) = self.vault.audit(&entry) {
+        if let Err(e) = self.audit(&entry) {
             result = Err(format!("could not write the audit log: {e}"));
         }
         match result {
@@ -399,6 +407,10 @@ impl Broker {
                 continue;
             }
             let meta = self.vault.meta(&binding.item).map_err(|e| e.to_string())?;
+            // Settled before anyone is asked: nothing outside the ACL is.
+            if !requester.acl.allows(&meta) {
+                return Err(format!("{} is not in this machine's ACL", meta.name));
+            }
             // Refused before anyone is asked: this device could not release it.
             let provider = self.provider(&meta)?;
             let profile = match meta.source {
@@ -648,6 +660,12 @@ impl Broker {
         }
     }
 
+    fn audit(&self, entry: &AuditEntry) -> crate::Result<()> {
+        self.vault.audit(entry)?;
+        self.ui.logged();
+        Ok(())
+    }
+
     /// The user pressed Stop on a released run: revoke every grant of that
     /// session. The caller is responsible for telling the requester to kill
     /// the command. Returns false if the run is unknown or already finished.
@@ -656,7 +674,7 @@ impl Broker {
             return false;
         };
         let revoked = lock(&self.grants).revoke_session(&requester, &session);
-        let _ = self.vault.audit(&AuditEntry {
+        let _ = self.audit(&AuditEntry {
             ts_ms: now_ms(),
             run_id,
             event: "stop".into(),
@@ -676,7 +694,7 @@ impl Broker {
             return;
         };
         self.ui.finished(run_id, exit);
-        let _ = self.vault.audit(&AuditEntry {
+        let _ = self.audit(&AuditEntry {
             ts_ms: now_ms(),
             run_id,
             event: "exit".into(),
@@ -785,7 +803,7 @@ mod tests {
                     max_grant_secs: 600,
                     destination: Destination::Command,
                     sites: vec![],
-                    folder: None,
+                    tags: vec![],
                 })
                 .unwrap();
         }
@@ -802,7 +820,7 @@ mod tests {
                     max_grant_secs: 600,
                     destination: Destination::Website,
                     sites: vec!["github.com".into(), "*.github.com".into()],
-                    folder: None,
+                    tags: vec![],
                 })
                 .unwrap();
         }
@@ -824,7 +842,7 @@ mod tests {
         let aws = AwsSignIn { start_url: session.start_url.clone(), region: session.region.clone(), profiles };
         let Fixture { broker, ui, biometric_ok, biometric_checks, _dir } = f;
         let vault = broker.vault;
-        vault.put_aws("mawaqit", aws, session.values(), None).unwrap();
+        vault.put_aws("mawaqit", aws, session.values(), vec![]).unwrap();
         let broker = Broker::with_aws(vault, ui.clone(), Rules::default(), api.clone());
         (Fixture { broker, ui, biometric_ok, biometric_checks, _dir }, api)
     }
@@ -895,7 +913,7 @@ mod tests {
                 max_grant_secs: 600,
                 destination: Destination::Command,
                 sites: vec![],
-                folder: None,
+                tags: vec![],
             })
             .unwrap();
         let broker = Arc::new(Broker::new(vault, Arc::new(FakeUi::default()), Rules::default()));
@@ -982,7 +1000,7 @@ mod tests {
     #[test]
     fn a_level_1_profile_used_remotely_notifies_once_per_session() {
         let (f, _api) = aws_fixture(3600);
-        let vm = Requester { id: "build-mac".into(), remote: true };
+        let vm = Requester { id: "build-mac".into(), remote: true, acl: Acl::everything() };
         for _ in 0..3 {
             released(f.broker.run(&aws_request("production-ro", "aws s3 ls", "claude-1"), &vm));
         }
@@ -1024,7 +1042,36 @@ mod tests {
     }
 
     fn local() -> Requester {
-        Requester { id: "local".into(), remote: false }
+        Requester { id: "local".into(), remote: false, acl: Acl::everything() }
+    }
+
+    /// A machine may only use what its ACL allows: anything else is refused
+    /// before anyone is asked, recorded, and left out of its list.
+    #[test]
+    fn the_acl_decides_what_a_machine_may_ask_for() {
+        let f = fixture();
+        f.broker.vault().update_rules("L3", vec![], 600, vec![], vec!["ci".into()]).unwrap();
+        *lock(&f.ui.answer) = Some(GrantScope::Once);
+        let vm = Requester {
+            id: "vm".into(),
+            remote: true,
+            acl: Acl { tags: vec!["CI".into()], secrets: vec!["L1".into()], ..Acl::default() },
+        };
+        // Allowed by its tag (letter case aside) and by name.
+        released(f.broker.run(&request(&["L3"], "make", "s"), &vm));
+        released(f.broker.run(&request(&["L1"], "make", "s"), &vm));
+        let asked = f.ui.prompts.load(Ordering::SeqCst);
+        // One secret outside it refuses the whole request, asking no one.
+        match f.broker.run(&request(&["L1", "L2"], "make", "s"), &vm) {
+            Outcome::Denied(reason) => assert_eq!(reason, "L2 is not in this machine's ACL"),
+            Outcome::Released { .. } => panic!("released outside the ACL"),
+        }
+        assert_eq!(f.ui.prompts.load(Ordering::SeqCst), asked);
+        assert_eq!(f.broker.vault().audit_tail(1).unwrap()[0].outcome, "denied: L2 is not in this machine's ACL");
+        let listed: Vec<String> = f.broker.list(&vm).unwrap().into_iter().map(|s| s.name).collect();
+        assert_eq!(listed, ["L1", "L3"]);
+        assert!(f.broker.list(&Requester { acl: Acl::default(), ..vm.clone() }).unwrap().is_empty());
+        assert_eq!(f.broker.list(&local()).unwrap().len(), 7, "all of them for an ACL of everything");
     }
 
     fn released(outcome: Outcome) -> BTreeMap<String, Zeroizing<String>> {
@@ -1067,7 +1114,7 @@ mod tests {
         let reason = denied(f.broker.run(&request(&["L1", "L3"], "aws s3 ls", "s"), &local()));
         assert!(reason.starts_with("L3: ") && reason.contains("newer version of Mayi"), "{reason}");
         assert_eq!(f.ui.prompts.load(Ordering::SeqCst), 0);
-        assert!(f.broker.list().unwrap().iter().any(|s| s.name == "L3"), "still listed");
+        assert!(f.broker.list(&local()).unwrap().iter().any(|s| s.name == "L3"), "still listed");
         released(f.broker.run(&request(&["L1"], "aws s3 ls", "s"), &local()));
     }
 
@@ -1076,7 +1123,7 @@ mod tests {
         let f = fixture();
         released(f.broker.run(&request(&["L2"], "x", "s"), &local()));
         assert_eq!(f.ui.notices.load(Ordering::SeqCst), 1);
-        let remote = Requester { id: "vm".into(), remote: true };
+        let remote = Requester { id: "vm".into(), remote: true, acl: Acl::everything() };
         released(f.broker.run(&request(&["L1"], "x", "s"), &remote));
         assert_eq!(f.ui.notices.load(Ordering::SeqCst), 2);
         assert_eq!(f.ui.prompts.load(Ordering::SeqCst), 0);

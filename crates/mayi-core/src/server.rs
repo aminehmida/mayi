@@ -19,6 +19,7 @@ use mayi_proto::noise::{
 use mayi_proto::{read_frame, write_frame, ClientMsg, Peer, RunRequest, ServerMsg};
 
 use crate::broker::{Broker, Outcome, Requester, Ui};
+use crate::model::Acl;
 use crate::hardware::HardwareKeys;
 use crate::now_ms;
 use crate::sync::{self, DeviceMsg};
@@ -78,6 +79,8 @@ struct Pairing {
     kind: TokenKind,
     secret: [u8; 32],
     expires_at_ms: u64,
+    /// For a machine: the secrets it may use once paired.
+    acl: Acl,
 }
 
 fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -232,12 +235,14 @@ impl Server {
             let server = self.clone();
             thread::spawn(move || {
                 let (Ok(reader), Ok(writer)) = (stream.try_clone(), stream.try_clone()) else { return };
+                // The socket is only reachable by this user on this machine:
+                // its agents, held to this device's agents' ACL.
+                let acl = server.broker.vault().agents_acl_here().unwrap_or_default();
                 server.serve_connection(Connection {
                     reader: Box::new(reader),
                     writer: Arc::new(Mutex::new(Box::new(writer))),
                     raw: Box::new(stream),
-                    // The socket is only reachable by this user on this machine.
-                    requester: Requester { id: "local".into(), remote: false },
+                    requester: Requester { id: "local".into(), remote: false, acl },
                 });
             });
         }
@@ -247,21 +252,22 @@ impl Server {
     /// Opens a pairing invitation and returns the token to paste on the
     /// other machine. It can be used once, within `ttl_secs`, and replaces
     /// any invitation still open.
-    pub fn start_pairing(&self, addresses: Vec<String>, port: u16, ttl_secs: u64) -> crate::Result<String> {
-        self.invite(TokenKind::Machine, addresses, port, ttl_secs)
+    /// The machine that pairs with it may use the secrets `acl` allows.
+    pub fn start_pairing(&self, addresses: Vec<String>, port: u16, ttl_secs: u64, acl: Acl) -> crate::Result<String> {
+        self.invite(TokenKind::Machine, addresses, port, ttl_secs, acl)
     }
 
     /// Like [`Server::start_pairing`], but the token admits a new vault
     /// device, which will receive the whole vault.
     pub fn start_enrolment(&self, addresses: Vec<String>, port: u16, ttl_secs: u64) -> crate::Result<String> {
-        self.invite(TokenKind::Device, addresses, port, ttl_secs)
+        self.invite(TokenKind::Device, addresses, port, ttl_secs, Acl::default())
     }
 
-    fn invite(&self, kind: TokenKind, addresses: Vec<String>, port: u16, ttl_secs: u64) -> crate::Result<String> {
+    fn invite(&self, kind: TokenKind, addresses: Vec<String>, port: u16, ttl_secs: u64, acl: Acl) -> crate::Result<String> {
         let (_, public) = self.broker.vault().noise_keypair()?;
         let token = PairingToken::new(kind, public, port, addresses);
         *lock(&self.pairing) =
-            Some(Pairing { kind, secret: token.secret, expires_at_ms: now_ms() + ttl_secs * 1000 });
+            Some(Pairing { kind, secret: token.secret, expires_at_ms: now_ms() + ttl_secs * 1000, acl });
         Ok(token.encode())
     }
 
@@ -326,13 +332,12 @@ impl Server {
 
         if let Some(secret) = secret {
             // The invitation is spent the moment a machine proves it holds it.
-            let still_open = {
+            let (still_open, acl) = {
                 let mut pairing = lock(&self.pairing);
-                let matches = pairing.as_ref().is_some_and(|p| p.secret == secret);
-                if matches {
-                    pairing.take();
+                match pairing.take_if(|p| p.secret == secret) {
+                    Some(spent) => (true, spent.acl),
+                    None => (false, Acl::default()),
                 }
-                matches
             };
             if mode == MODE_ENROL {
                 // Sharing level 4 keys may wait on the owner's fingerprint.
@@ -344,7 +349,7 @@ impl Server {
             let reply = match read_frame::<_, ClientMsg>(&mut reader)? {
                 Some(ClientMsg::Pair { name }) if still_open => {
                     let record =
-                        vault.add_requester(&clean_name(&name), remote_key).map_err(io::Error::other)?;
+                        vault.add_requester(&clean_name(&name), remote_key, acl).map_err(io::Error::other)?;
                     self.broker.ui().paired(&record.name, &record.id);
                     ServerMsg::Paired { device: vault.device_name().map_err(io::Error::other)? }
                 }
@@ -379,7 +384,7 @@ impl Server {
             reader: Box::new(reader),
             writer,
             raw: Box::new(stream),
-            requester: Requester { id: machine.label(), remote: true },
+            requester: Requester { id: machine.label(), remote: true, acl: vault.acl_for(&machine).unwrap_or_default() },
         });
         Ok(())
     }
@@ -432,7 +437,7 @@ impl Server {
         let mut run: Option<u64> = None;
         while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut conn.reader) {
             let reply = match msg {
-                ClientMsg::List => match self.broker.list() {
+                ClientMsg::List => match self.broker.list(&conn.requester) {
                     Ok(secrets) => ServerMsg::Secrets { secrets },
                     Err(e) => ServerMsg::Error { message: e.to_string() },
                 },

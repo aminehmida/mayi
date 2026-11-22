@@ -25,7 +25,7 @@ Device to requester:
 |---|---|---|
 | `released` | `run_id`, `env` | The values to inject, by environment variable. |
 | `denied` | `reason` | The request was refused. |
-| `secrets` | `secrets` | Reply to `list`: name, level, field names, for a login `login: true` and its `sites`, and for an AWS sign-in `aws` (its `start_url`, `region` and `profiles`, each with `name`, `level`, `account_id`, `account_name` and `role`). Never contains a value. |
+| `secrets` | `secrets` | Reply to `list`, for each secret the requester's ACL allows: name, level, field names, for a login `login: true` and its `sites`, and for an AWS sign-in `aws` (its `start_url`, `region` and `profiles`, each with `name`, `level`, `account_id`, `account_name` and `role`). Never contains a value. |
 | `stop` | | The user pressed Stop: kill the command. |
 | `paired` | `device` | Pairing succeeded; `device` is the vault device's name. |
 | `peers` | `devices`, `sender`, `sender_active` | Each device's name, tunnel key, port and addresses; the replying device's own tunnel key; and whether its owner is using it right now. |
@@ -148,6 +148,28 @@ is unknown or revoked the device sends `error` and closes. Otherwise the
 connection is served exactly like a local one, except that the request is
 marked remote: silent (level 1) secrets are raised to a notification, and
 prompts and logs name the machine.
+
+### ACLs
+
+Each requester has an ACL, held on the vault side only: `all`, a list of
+tags and a list of secret names. A secret is allowed when the ACL is `all`,
+names it, or shares one of its tags (tags compare without case).
+
+- A paired machine's ACL is in its requester record. The device keeps the
+  ACL chosen for an invitation with the pending token and gives it to the
+  machine's record when `pair` succeeds. The token carries nothing about it,
+  and the machine is never told its ACL.
+- The requester on a vault device's own machine, over the socket or enrolled
+  with `enrol_local`, uses that device's `agents` ACL, kept in the device's
+  member record. A device sets it to `all` the first time it serves its
+  socket.
+- A `run` that names a secret outside the ACL is answered `denied` with
+  `NAME is not in this machine's ACL` before levels are considered and
+  without asking anyone. It is logged with outcome `denied: …`.
+- `list` returns only the secrets the ACL allows.
+
+ACLs live in requester and member records, so they sync like any other change
+and every device enforces the same lists.
 
 ### What a machine stores
 
@@ -310,7 +332,7 @@ apart from its own, ignores its own coming back, and drops any older than 90
 days, as it does its own. A device whose digest has no `log:` markers (from
 before alpha.8) is sent none.
 
-A secret's rules carry its folder and its rotation notes. Removing a device
+A secret's rules carry its tags and its rotation notes. Removing a device
 or revoking a machine adds a note (who, removed or revoked, when) to each
 secret it could read or was given; saving a new value clears the notes, and
 so does dismissing them. Both are changes to the item, so they sync as one.

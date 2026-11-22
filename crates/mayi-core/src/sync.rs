@@ -355,7 +355,7 @@ pub fn sync_as_callee<R: Read, W: Write>(
 mod tests {
     use super::*;
     use crate::hardware::{HardwareKeys, SoftwareKeys};
-    use crate::model::{Destination, Level, NewItem};
+    use crate::model::{Acl, Destination, Level, NewItem};
     use crate::vault::NewDevice;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -370,7 +370,7 @@ mod tests {
             max_grant_secs: 600,
             destination: Destination::Command,
             sites: vec![],
-            folder: None,
+            tags: vec![],
         }
     }
 
@@ -436,7 +436,7 @@ mod tests {
         let p = pair(&[("L1", Level::Log), ("L4", Level::Biometric)]);
         assert_eq!(p.mac_checks.load(Ordering::SeqCst), 1, "sharing level 4 keys needs one check");
         assert!(p.phone.list().unwrap().is_empty(), "empty until the first sync");
-        p.mac.add_requester("build-vm", [3u8; 32]).unwrap();
+        p.mac.add_requester("build-vm", [3u8; 32], Acl::everything()).unwrap();
 
         sync(&p.mac, &p.phone);
         assert_eq!(value(&p.phone, "L1"), "L1-value");
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn revocations_and_device_info_sync() {
         let p = pair(&[]);
-        let machine = p.mac.add_requester("vm", [4u8; 32]).unwrap();
+        let machine = p.mac.add_requester("vm", [4u8; 32], Acl::everything()).unwrap();
         sync(&p.mac, &p.phone);
         p.phone.revoke_requester(&machine.id).unwrap();
         p.phone.set_info(7462, vec!["10.0.0.9".into()]).unwrap();
@@ -556,7 +556,7 @@ mod tests {
         let other =
             Vault::create(&dir.path().join("o.db"), Arc::new(SoftwareKeys::generate(|_| true)), "other").unwrap();
         other.put(item("EVIL", Level::Log, "x")).unwrap();
-        other.add_requester("intruder", [9u8; 32]).unwrap();
+        other.add_requester("intruder", [9u8; 32], Acl::everything()).unwrap();
         for record in other.newer_than(&Digest::new()).unwrap() {
             assert!(p.mac.apply(&[record]).is_err());
         }
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn secrets_to_rotate_are_flagged_everywhere() {
         let p = pair(&[("L1", Level::Log), ("L2", Level::Notify)]);
-        let machine = p.mac.add_requester("build-vm", [7u8; 32]).unwrap();
+        let machine = p.mac.add_requester("build-vm", [7u8; 32], Acl::everything()).unwrap();
         p.mac.audit(&crate::vault::AuditEntry { requester: machine.label(), ..entry("request", "L1") }).unwrap();
         sync(&p.mac, &p.phone);
         // Revoked on the phone, which learnt of the release by sync.
@@ -658,9 +658,9 @@ mod tests {
         sync(&p.mac, &p.phone);
         assert_eq!(p.mac.meta("L1").unwrap().rotate.len(), 1, "the Mac shows it too");
 
-        // Rules and folders keep the flag; a new value clears it.
-        p.mac.update_rules("L1", vec![], 60, vec![], Some("Work".into())).unwrap();
-        assert_eq!(p.mac.meta("L1").unwrap().folder.as_deref(), Some("Work"));
+        // Rules and tags keep the flag; a new value clears it.
+        p.mac.update_rules("L1", vec![], 60, vec![], vec!["Work".into()]).unwrap();
+        assert_eq!(p.mac.meta("L1").unwrap().tags, ["Work"]);
         assert_eq!(p.mac.meta("L1").unwrap().rotate.len(), 1);
         p.mac.put(item("L1", Level::Log, "rotated")).unwrap();
         assert!(p.mac.meta("L1").unwrap().rotate.is_empty());

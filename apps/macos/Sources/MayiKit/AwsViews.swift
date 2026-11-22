@@ -163,7 +163,8 @@ func openPage(_ flow: AwsSignInFlow) {
 /// which roles agents may use and at which level.
 public struct AwsSignInSheet: View {
     @ObservedObject var model: AppModel
-    let folder: String?
+    /// The tag being looked at, which a new sign-in starts with.
+    let tag: String?
     /// Inside the Add dialog: another type was picked.
     let onPickKind: ((AddKind) -> Void)?
     let onDone: () -> Void
@@ -187,10 +188,10 @@ public struct AwsSignInSheet: View {
     @State private var error: String?
 
     public init(
-        model: AppModel, folder: String? = nil, onPickKind: ((AddKind) -> Void)? = nil, onDone: @escaping () -> Void
+        model: AppModel, tag: String? = nil, onPickKind: ((AddKind) -> Void)? = nil, onDone: @escaping () -> Void
     ) {
         self.model = model
-        self.folder = folder
+        self.tag = tag
         self.onPickKind = onPickKind
         self.onDone = onDone
     }
@@ -362,7 +363,7 @@ public struct AwsSignInSheet: View {
         if cliProfiles != model.awsCliProfiles { model.setAwsCliProfiles(cliProfiles) }
         let chosen = profiles.filter(\.enabled).map(\.record)
         if let problem = await model.saveAwsSignIn(
-            name: name, session: session, profiles: chosen, folder: folder, forgetCliSignIns: forgetCli)
+            name: name, session: session, profiles: chosen, tags: tag.map { [$0] } ?? [], forgetCliSignIns: forgetCli)
         {
             error = problem
         } else {
