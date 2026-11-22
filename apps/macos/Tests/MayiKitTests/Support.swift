@@ -31,6 +31,8 @@ final class TestKeys: KeyStore, @unchecked Sendable {
         try agree(device, peerPublic)
     }
 
+    func cancelBiometric() {}
+
     func biometricEcdh(peerPublics: [Data], prompt: String) throws -> [Data] {
         lock.withLock { _prompts.append(prompt) }
         guard allowBiometric else { throw KeyError.Denied }

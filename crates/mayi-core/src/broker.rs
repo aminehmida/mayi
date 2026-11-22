@@ -129,6 +129,9 @@ pub struct Broker {
     rules: Rules,
     aws: AwsProvider,
     grants: Mutex<GrantStore>,
+    /// The run whose biometric check is showing, so withdrawing that run
+    /// takes the check down too.
+    biometric_run: Mutex<Option<u64>>,
     /// Sessions already told that a level 1 secret is used from another
     /// machine: told once per session, not at every use.
     noticed: Mutex<HashSet<(String, String, String)>>,
@@ -191,6 +194,7 @@ impl Broker {
             rules,
             aws: AwsProvider::new(api),
             noticed: Mutex::default(),
+            biometric_run: Mutex::default(),
             grants: Mutex::default(),
             active: Mutex::default(),
             withdrawn: Mutex::default(),
@@ -282,6 +286,26 @@ impl Broker {
     pub fn withdraw(&self, run_id: u64) {
         lock(&self.withdrawn).insert(run_id);
         self.ui.withdraw(run_id);
+        // Answered elsewhere: a fingerprint dialog for it must not stay up.
+        if *lock(&self.biometric_run) == Some(run_id) {
+            self.vault.cancel_biometric();
+        }
+    }
+
+    /// Runs a biometric check for `run_id`, so that withdrawing the run
+    /// takes it down. A run already withdrawn is not asked at all.
+    fn biometric<T>(&self, run_id: u64, check: impl FnOnce() -> crate::Result<T>) -> Result<T, String> {
+        *lock(&self.biometric_run) = Some(run_id);
+        let result = if lock(&self.withdrawn).contains(&run_id) {
+            Err(WITHDRAWN.to_string())
+        } else {
+            check().map_err(|e| match e {
+                Error::BiometricDenied => "biometric check failed or was cancelled".to_string(),
+                other => other.to_string(),
+            })
+        };
+        *lock(&self.biometric_run) = None;
+        result
     }
 
     pub fn run_reserved(&self, run_id: u64, request: &RunRequest, requester: &Requester) -> Outcome {
@@ -466,12 +490,8 @@ impl Broker {
             .collect();
         if !presence.is_empty() {
             let names: Vec<String> = presence.iter().map(|p| p.shown()).collect();
-            self.vault
-                .confirm_presence(&biometric_prompt(site.as_ref(), request, requester, &names))
-                .map_err(|e| match e {
-                    Error::BiometricDenied => "biometric check failed or was cancelled".to_string(),
-                    other => other.to_string(),
-                })?;
+            let text = biometric_prompt(site.as_ref(), request, requester, &names);
+            self.biometric(run_id, || self.vault.confirm_presence(&text))?;
         }
 
         // Level 4 secrets not covered by a grant: one biometric check for all.
@@ -495,10 +515,7 @@ impl Broker {
                 continue;
             }
             let metas: Vec<&ItemMeta> = group.iter().map(|p| &p.meta).collect();
-            let revealed = self.vault.reveal(&metas, &text).map_err(|e| match e {
-                Error::BiometricDenied => "biometric check failed or was cancelled".to_string(),
-                other => other.to_string(),
-            })?;
+            let revealed = self.biometric(run_id, || self.vault.reveal(&metas, &text))?;
             for (plan, v) in group.iter().zip(revealed) {
                 values.insert(&plan.meta.name, v);
             }
@@ -823,6 +840,76 @@ mod tests {
             session: session.into(),
             ..Default::default()
         }
+    }
+
+    /// Keys whose fingerprint check stays up until it is cancelled, as a
+    /// real dialog does while nobody touches the sensor.
+    struct WaitingKeys {
+        inner: SoftwareKeys,
+        showing: Arc<AtomicBool>,
+        cancelled: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl crate::hardware::HardwareKeys for WaitingKeys {
+        fn device_public(&self) -> Vec<u8> {
+            self.inner.device_public()
+        }
+        fn biometric_public(&self) -> Vec<u8> {
+            self.inner.biometric_public()
+        }
+        fn device_ecdh(&self, peer: &[u8]) -> crate::Result<crate::crypto::Key> {
+            self.inner.device_ecdh(peer)
+        }
+        fn biometric_ecdh(&self, _peers: &[&[u8]], _prompt: &str) -> crate::Result<Vec<crate::crypto::Key>> {
+            self.showing.store(true, Ordering::SeqCst);
+            let (done, wake) = &*self.cancelled;
+            let mut cancelled = lock(done);
+            while !*cancelled {
+                cancelled = wake.wait(cancelled).unwrap();
+            }
+            Err(Error::BiometricDenied)
+        }
+        fn cancel_biometric(&self) {
+            let (done, wake) = &*self.cancelled;
+            *lock(done) = true;
+            wake.notify_all();
+        }
+    }
+
+    #[test]
+    fn answering_elsewhere_takes_the_fingerprint_dialog_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let showing = Arc::new(AtomicBool::new(false));
+        let keys = WaitingKeys {
+            inner: SoftwareKeys::generate(|_| true),
+            showing: showing.clone(),
+            cancelled: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+        };
+        let vault = Vault::create(&dir.path().join("v.db"), Arc::new(keys), "test").unwrap();
+        vault
+            .put(NewItem {
+                name: "L4".into(),
+                level: Level::Biometric,
+                values: [("value".to_string(), Zeroizing::new("four".to_string()))].into_iter().collect(),
+                allow: vec![],
+                max_grant_secs: 600,
+                destination: Destination::Command,
+                sites: vec![],
+                folder: None,
+            })
+            .unwrap();
+        let broker = Arc::new(Broker::new(vault, Arc::new(FakeUi::default()), Rules::default()));
+        let run_id = broker.reserve_run();
+        let asking = {
+            let broker = broker.clone();
+            std::thread::spawn(move || broker.run_reserved(run_id, &request(&["L4"], "deploy", "s"), &local()))
+        };
+        while !showing.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        broker.withdraw(run_id);
+        assert_eq!(denied(asking.join().unwrap()), WITHDRAWN);
+        assert_eq!(broker.vault().audit_tail(1).unwrap()[0].outcome, "withdrawn");
     }
 
     #[test]

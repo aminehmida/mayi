@@ -92,11 +92,19 @@ public final class SecureEnclaveKeys: KeyStore, @unchecked Sendable {
         }
     }
 
+    /// The Touch ID dialog showing now, so it can be taken down.
+    private let promptLock = NSLock()
+    private var showing: LAContext?
+
     public func biometricEcdh(peerPublics: [Data], prompt: String) throws -> [Data] {
         // One context for the whole batch, so the user is asked once.
         let context = LAContext()
         context.localizedReason = prompt
-        defer { context.invalidate() }
+        promptLock.withLock { showing = context }
+        defer {
+            promptLock.withLock { if showing === context { showing = nil } }
+            context.invalidate()
+        }
         do {
             let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(
                 dataRepresentation: biometricBlob, authenticationContext: context)
@@ -106,6 +114,12 @@ public final class SecureEnclaveKeys: KeyStore, @unchecked Sendable {
         } catch {
             throw KeyError.Failed(detail: "Secure Enclave: \(error.localizedDescription)")
         }
+    }
+
+    /// Another device answered, or the requester gave up: closes the dialog,
+    /// and the check in progress fails as cancelled.
+    public func cancelBiometric() {
+        promptLock.withLock { showing?.invalidate() }
     }
 
     private static func agree(_ key: SecureEnclave.P256.KeyAgreement.PrivateKey, _ peer: Data) throws -> Data {

@@ -24,6 +24,8 @@ class KeystoreKeys(
     /** Accept keys the system holds in software. Only ever true in a debug build on an emulator. */
     private val allowSoftwareKeys: Boolean = false,
     private val authenticate: (reason: String) -> Boolean,
+    /** Takes down the fingerprint prompt [authenticate] is showing. */
+    private val cancelAuthentication: () -> Unit = {},
 ) : dev.mayi.ffi.KeyStore {
     private val store = KeyStore.getInstance(PROVIDER).apply { load(null) }
 
@@ -86,6 +88,9 @@ class KeystoreKeys(
             throw KeyException.Failed("Keystore: ${e.message}")
         }
     }
+
+    /** Another device answered, or the requester gave up: the prompt goes away and the check fails. */
+    override fun cancelBiometric() = cancelAuthentication()
 
     companion object {
         private const val PROVIDER = "AndroidKeyStore"

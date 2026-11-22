@@ -52,6 +52,10 @@ pub trait KeyStore: Send + Sync {
         peer_publics: Vec<Vec<u8>>,
         prompt: String,
     ) -> Result<Vec<Vec<u8>>, KeyError>;
+    /// Takes down a biometric check in progress, from another thread:
+    /// another device answered, or the requester gave up. `biometric_ecdh`
+    /// then fails with `Denied`.
+    fn cancel_biometric(&self);
 }
 
 struct KeyAdapter(Arc<dyn KeyStore>);
@@ -94,6 +98,10 @@ impl HardwareKeys for KeyAdapter {
             .into_iter()
             .map(to_key)
             .collect()
+    }
+
+    fn cancel_biometric(&self) {
+        self.0.cancel_biometric();
     }
 }
 

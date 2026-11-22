@@ -593,6 +593,11 @@ impl Vault {
         Ok(meta)
     }
 
+    /// Takes down a biometric check this vault is waiting on.
+    pub fn cancel_biometric(&self) {
+        self.hw.cancel_biometric();
+    }
+
     /// Asks for the owner's fingerprint (Touch ID, Apple Watch or password
     /// on a Mac) through this device's level 4 key, showing `prompt`. Opens
     /// nothing: it proves the owner is there, in a way no program can fake.

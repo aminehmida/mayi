@@ -25,6 +25,11 @@ pub trait HardwareKeys: Send + Sync {
     /// biometric check that shows `prompt`. Returns
     /// [`Error::BiometricDenied`] if the check fails or is cancelled.
     fn biometric_ecdh(&self, peer_publics: &[&[u8]], prompt: &str) -> Result<Vec<Key>>;
+
+    /// Takes down a biometric check in progress (another device answered,
+    /// or the requester gave up): [`HardwareKeys::biometric_ecdh`] then
+    /// returns [`Error::BiometricDenied`].
+    fn cancel_biometric(&self) {}
 }
 
 /// Keys held in process memory, with a callback standing in for the

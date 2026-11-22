@@ -34,6 +34,8 @@ class ControllerTest {
         override fun devicePublic() = P256.encode(device.public)
         override fun biometricPublic() = P256.encode(biometric.public)
         override fun deviceEcdh(peerPublic: ByteArray) = P256.agree(device.private, peerPublic)
+        override fun cancelBiometric() {}
+
         override fun biometricEcdh(peerPublics: List<ByteArray>, prompt: String): List<ByteArray> {
             synchronized(prompts) { prompts.add(prompt) }
             if (!allowBiometric) throw KeyException.Denied()

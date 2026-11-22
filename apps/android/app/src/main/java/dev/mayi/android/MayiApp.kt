@@ -63,7 +63,10 @@ class MayiApp : Application() {
         get() = Build.HARDWARE == "ranchu" || Build.HARDWARE == "goldfish" || Build.FINGERPRINT.contains("generic")
 
     private val keys: KeystoreKeys by lazy {
-        KeystoreKeys(allowSoftwareKeys = BuildConfig.DEBUG && onEmulator, authenticate = ::authenticate)
+        KeystoreKeys(
+            allowSoftwareKeys = BuildConfig.DEBUG && onEmulator, authenticate = ::authenticate,
+            cancelAuthentication = ::cancelAuthentication,
+        )
     }
     private val vaultFile: File get() = File(filesDir, "vault.db")
 
@@ -298,9 +301,11 @@ class MayiApp : Application() {
      * notification and waits for the user to open it.
      */
     fun authenticate(reason: String): Boolean {
+        cancelRequested = false
         if (foreground == null) alert(reason)
         val deadline = System.currentTimeMillis() + 60_000
-        while (foreground == null && System.currentTimeMillis() < deadline) Thread.sleep(200)
+        while (foreground == null && !cancelRequested && System.currentTimeMillis() < deadline) Thread.sleep(200)
+        if (cancelRequested) return false
         val activity = foreground ?: return false
         val result = CompletableFuture<Boolean>()
         activity.runOnUiThread {
@@ -319,7 +324,10 @@ class MayiApp : Application() {
                 .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                 .setNegativeButtonText("Cancel")
                 .build()
-            BiometricPrompt(activity, ContextCompat.getMainExecutor(activity), callback).authenticate(info)
+            BiometricPrompt(activity, ContextCompat.getMainExecutor(activity), callback).also {
+                prompt = it
+                it.authenticate(info)
+            }
         }
         getSystemService(NotificationManager::class.java).cancel(NOTE_ATTENTION)
         return try {
@@ -327,6 +335,24 @@ class MayiApp : Application() {
         } catch (e: Exception) {
             false
         }
+    }
+
+    /** The fingerprint prompt showing now, if any. */
+    @Volatile
+    private var prompt: BiometricPrompt? = null
+
+    /** Set when the check was called off before its prompt could show. */
+    @Volatile
+    private var cancelRequested = false
+
+    /** Takes down the fingerprint prompt: another device answered, or the requester gave up. */
+    private fun cancelAuthentication() {
+        cancelRequested = true
+        getSystemService(NotificationManager::class.java).cancel(NOTE_ATTENTION)
+        val showing = prompt ?: return
+        prompt = null
+        foreground?.runOnUiThread { showing.cancelAuthentication() }
+        getSystemService(NotificationManager::class.java).cancel(NOTE_ATTENTION)
     }
 
     private fun openAppIntent(): PendingIntent = PendingIntent.getActivity(
