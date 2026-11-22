@@ -285,9 +285,7 @@ into setup.
 A request goes to all your devices that can be reached, and the first answer
 counts; the others take their prompt down. The device you are using is asked
 first (a Mac unlocked with recent input, or a phone unlocked with the screen
-on), and the others 30 seconds later, so you are not asked twice. When you
-are using the Mac the agent runs on, that Mac is asked alone first, even
-with your phone unlocked. An agent on
+on), and the others 30 seconds later, so you are not asked twice. An agent on
 a Mac with the app reaches your phone too: `mayi` there pairs the Mac with
 the vault the first time it needs to. Devices, "Agents on this Mac can also
 ask your other devices" turns that off.
