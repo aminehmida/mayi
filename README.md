@@ -288,7 +288,8 @@ first (a Mac unlocked with recent input, or a phone unlocked with the screen
 on), and the others 30 seconds later, so you are not asked twice. An agent on
 a Mac with the app reaches your phone too: `mayi` there pairs the Mac with
 the vault the first time it needs to. Devices, "Agents on this Mac can also
-ask your other devices" turns that off.
+ask your other devices" turns that off. When you are using the Mac the agent runs on, that Mac
+is asked alone first, even with your phone unlocked.
 
 No push service is involved, Google's or anyone's: a machine connects to the
 phone directly, over the same network or [Tailscale](https://tailscale.com).

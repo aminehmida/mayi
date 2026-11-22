@@ -7,7 +7,7 @@
 //! the wait for the owner's answer starts only once a device has the request.
 //!
 //! The device the owner is using right now is asked first, and the others a
-//! little later, so the owner is not asked twice and a release that needs no
+//! little later; when that includes the agent's own machine, that one alone, so the owner is not asked twice and a release that needs no
 //! answer does not happen on two devices. The first decision wins; closing
 //! the other connections takes their prompts down.
 
@@ -574,6 +574,9 @@ pub fn ask(request: &RunRequest, remote_only: bool, wait: Duration, timeout: Dur
     // and the decision deadline.
     let mut asked_at: Option<Instant> = None;
     let mut alone_for = FIRST;
+    // The agent's own machine, in use, was asked first: the others wait
+    // their turn even if they are in use too (a phone unlocked in hand).
+    let mut own_first = false;
     let mut waiting_said = false;
     // Who was asked, to tell the agent once the decision takes a moment.
     let mut to_say: Vec<(Instant, String)> = Vec::new();
@@ -662,7 +665,12 @@ pub fn ask(request: &RunRequest, remote_only: bool, wait: Duration, timeout: Dur
             None if !connected.is_empty() && (everyone_tried || first_connected.is_some_and(|t| now >= t + GATHER)) => {
                 let active: Vec<usize> =
                     connected.iter().copied().filter(|&i| search.slots[i].conn.as_ref().is_some_and(|c| c.active)).collect();
-                to_ask = if !active.is_empty() {
+                let own = active.iter().copied().find(|&i| search.slots[i].local());
+                to_ask = if let Some(own) = own {
+                    alone_for = IN_USE_FIRST;
+                    own_first = true;
+                    vec![own]
+                } else if !active.is_empty() {
                     alone_for = IN_USE_FIRST;
                     active
                 } else if let Some(&local) = connected.iter().find(|&&i| search.slots[i].local()) {
@@ -676,7 +684,7 @@ pub fn ask(request: &RunRequest, remote_only: bool, wait: Duration, timeout: Dur
             Some(first) => {
                 for &i in &connected {
                     let active = search.slots[i].conn.as_ref().is_some_and(|c| c.active);
-                    if active || now >= first + alone_for {
+                    if (active && !own_first) || now >= first + alone_for {
                         to_ask.push(i);
                     }
                 }

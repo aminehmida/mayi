@@ -298,6 +298,32 @@ fn a_machine_with_a_vault_device_also_asks_the_others() {
     assert_eq!(config["devices"].as_array().unwrap().len(), 2);
 }
 
+/// The agent's own Mac in use comes first, even with the phone unlocked in
+/// hand: the phone gets the request only once the Mac had it alone.
+#[test]
+fn the_agents_own_machine_in_use_comes_first_even_with_the_phone_in_use() {
+    let mut setup = setup();
+    let phone = setup.start_phone();
+    phone.server.sync_all().unwrap();
+    let listener = Server::bind(&setup.dir.path().join("mayi.sock")).unwrap();
+    thread::spawn({
+        let server = setup.mac.server.clone();
+        move || server.serve(listener)
+    });
+    std::fs::write(setup.dir.path().join("requester.json"), "{}").unwrap();
+    setup.mac.owner.active.store(true, Ordering::SeqCst);
+    phone.owner.active.store(true, Ordering::SeqCst);
+
+    let child = setup.run(&[]);
+    eventually("the Mac is asked", Duration::from_secs(10), || setup.mac.owner.asked.load(Ordering::SeqCst) == 1);
+    thread::sleep(Duration::from_secs(4));
+    assert_eq!(phone.owner.asked.load(Ordering::SeqCst), 0, "the phone waits its turn");
+    setup.mac.owner.answer.store(ALLOW, Ordering::SeqCst);
+    let (code, out, err) = finish(child);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "released");
+}
+
 /// A device that drops a request on its own (a phone whose wait was cut
 /// short as it woke) has not answered: it is asked again.
 #[test]
